@@ -1,0 +1,18 @@
+# CPU pilot environment only. Cache, environment and TMPDIR must remain on NAS.
+# Use uv --link-mode symlink with the retained NAS cache, not a local cache.
+onnxruntime==1.23.2
+librosa==0.11.0
+datasets==4.3.0
+torch==2.10.0
+torchaudio==2.10.0
+hyperpyyaml==1.2.2
+einops==0.8.1
+# HyperPyYAML 1.2.2 fails with ruamel 0.19: Loader.max_depth is missing.
+# Upstream confirmation: https://github.com/speechbrain/HyperPyYAML/pull/32
+ruamel.yaml==0.18.16
+ruamel.yaml.clib==0.2.15
+
+# Exact-source CPU dataset diagnostic and local Qwen2 text tokenizer.
+transformers==4.57.6
+huggingface-hub==0.36.2
+tokenizers==0.22.2

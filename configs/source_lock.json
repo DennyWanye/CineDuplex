@@ -1,0 +1,24 @@
+{
+  "code": {
+    "repo": "https://github.com/HITsz-TMG/Lychee-FD",
+    "commit": "7bb1068c59b578e1f8e65fb762cd26708c14cc6d"
+  },
+  "models": [
+    {
+      "repo_id": "HIT-TMG/Lychee-FD",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "index": "model.safetensors.index.json",
+      "expected_shards": 6
+    },
+    {
+      "repo_id": "stepfun-ai/Step-Audio-2-mini",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "prefix": "token2wav"
+    }
+  ],
+  "index_claim": {
+    "total_parameters": 12812043520,
+    "total_size": 25624087040
+  },
+  "claim_level": "REMOTE_INDEX_VERIFIED_NOT_WEIGHT_INTEGRITY"
+}

@@ -1,0 +1,148 @@
+{
+  "assets": [
+    {
+      "repo": "stepfun-ai/Step-Audio-2-mini",
+      "repo_type": "model",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "source_path": "token2wav/speech_tokenizer_v2_25hz.onnx",
+      "destination": "raw/codec/speech_tokenizer_v2_25hz.onnx",
+      "size": 496082973,
+      "sha256": "d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71"
+    },
+    {
+      "repo": "stepfun-ai/Step-Audio-2-mini",
+      "repo_type": "model",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "source_path": "token2wav/campplus.onnx",
+      "destination": "raw/codec/campplus.onnx",
+      "size": 28303423,
+      "sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"
+    },
+    {
+      "repo": "stepfun-ai/Step-Audio-2-mini",
+      "repo_type": "model",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "source_path": "token2wav/flow.pt",
+      "destination": "raw/codec/flow.pt",
+      "size": 623466603,
+      "sha256": "15ccff24256ff61537c7f8b51e025116b83405f3fb017b54b008fc97da115446"
+    },
+    {
+      "repo": "stepfun-ai/Step-Audio-2-mini",
+      "repo_type": "model",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "source_path": "token2wav/hift.pt",
+      "destination": "raw/codec/hift.pt",
+      "size": 83390254,
+      "sha256": "3386cc880324d4e98e05987b99107f49e40ed925b8ecc87c1f4939432d429879"
+    },
+    {
+      "repo": "stepfun-ai/Step-Audio-2-mini",
+      "repo_type": "model",
+      "revision": "e36fdd5d71e0ea22f09dd94bbab9bfc544ca1e36",
+      "source_path": "token2wav/flow.yaml",
+      "destination": "raw/codec/flow.yaml",
+      "size": 1099,
+      "git_blob_sha1": "8638dca97881751e50c132498acbfa41ecf74d6f"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "config.json",
+      "destination": "raw/lychee-tokenizer/config.json",
+      "size": 10038,
+      "git_blob_sha1": "b18d12248cb40f2497d6cea6d2be67931c87e0b3"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "tokenizer_config.json",
+      "destination": "raw/lychee-tokenizer/tokenizer_config.json",
+      "size": 1203033,
+      "git_blob_sha1": "6c617708b41e829039bb0a43332fc6bb42091739"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "special_tokens_map.json",
+      "destination": "raw/lychee-tokenizer/special_tokens_map.json",
+      "size": 1134,
+      "git_blob_sha1": "f5e8baaba55bddb8a325bc245b788f1e32bed540"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "added_tokens.json",
+      "destination": "raw/lychee-tokenizer/added_tokens.json",
+      "size": 173611,
+      "git_blob_sha1": "9ded68b4c0f0d7ab4478cc881c0e8e12e48dbaab"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "merges.txt",
+      "destination": "raw/lychee-tokenizer/merges.txt",
+      "size": 1671853,
+      "git_blob_sha1": "31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"
+    },
+    {
+      "repo": "HIT-TMG/Lychee-FD",
+      "repo_type": "model",
+      "revision": "ac06087bef70b33d4dfebf63a3eadadb4e024f33",
+      "source_path": "vocab.json",
+      "destination": "raw/lychee-tokenizer/vocab.json",
+      "size": 3383407,
+      "git_blob_sha1": "6bce3a0a3866c4791a74d83d78f6824c3af64ec3"
+    },
+    {
+      "repo": "qualialabsAI/SmoothConv",
+      "repo_type": "dataset",
+      "revision": "cd74b4fca285a66d6ac8c16228d0953ff1e0cda2",
+      "source_path": "none_edu_20h_2ch/1765799160_cuCZuOweWy_seg59_active.wav",
+      "destination": "raw/SmoothConv/1765799160_cuCZuOweWy_seg59_active.wav",
+      "size": 12014636,
+      "sha256": "0320577c20e30403e0f963c8407dd0671c891676f9f4806e2fdcb36c6a7db9eb"
+    },
+    {
+      "repo": "qualialabsAI/SmoothConv",
+      "repo_type": "dataset",
+      "revision": "cd74b4fca285a66d6ac8c16228d0953ff1e0cda2",
+      "source_path": "none_edu_20h_2ch/1765799160_cuCZuOweWy_seg59_active.json",
+      "destination": "raw/SmoothConv/1765799160_cuCZuOweWy_seg59_active.json",
+      "size": 12863,
+      "sha256": "c38a5d0fe777043369201254663d751a54776f539cafbe96bc725c983dd75e32"
+    },
+    {
+      "repo": "qualialabsAI/SmoothConv",
+      "repo_type": "dataset",
+      "revision": "cd74b4fca285a66d6ac8c16228d0953ff1e0cda2",
+      "source_path": "none_edu_70h_2ch/1769939396_AJdvYtW8AA_seg241_active.wav",
+      "destination": "raw/SmoothConv/1769939396_AJdvYtW8AA_seg241_active.wav",
+      "size": 12309548,
+      "sha256": "ec4638c5b8e7ae29416ecd074e6a14335e61a9fcc3b1f299b649cc29fbf78b28"
+    },
+    {
+      "repo": "qualialabsAI/SmoothConv",
+      "repo_type": "dataset",
+      "revision": "cd74b4fca285a66d6ac8c16228d0953ff1e0cda2",
+      "source_path": "none_edu_70h_2ch/1769939396_AJdvYtW8AA_seg241_active.json",
+      "destination": "raw/SmoothConv/1769939396_AJdvYtW8AA_seg241_active.json",
+      "size": 11455,
+      "sha256": "5c875656788c2d2f8fe985fdaf026bf4558e215bf81c2ff8ceeee953394b3a7d"
+    }
+  ],
+  "emotiontalk": {
+    "repo": "BAAI/Emotiontalk",
+    "revision": "adbc17fc944e8cf2873643906160c6ca0259ab61",
+    "archive": "Audio.tar",
+    "archive_size": 14811722752,
+    "prefix_bytes": 67108864,
+    "prefix_sha256": "46f12cbae60370c47e1744764232de1b4e8e23efcf6bc4f55acda1ba1fe5d217"
+  },
+  "smoothconv_revision": "cd74b4fca285a66d6ac8c16228d0953ff1e0cda2"
+}

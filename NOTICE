@@ -1,0 +1,14 @@
+CineDuplex
+Copyright 2026 DennyWanye
+
+The original project code and public documentation are provided under Apache-2.0.
+The vendored source snapshot under vendor/lychee-fd-source is from HITsz-TMG/
+Lychee-FD commit 7bb1068c59b578e1f8e65fb762cd26708c14cc6d. Its original LICENSE,
+NOTICE, third-party notices and component licenses remain applicable.
+configs/vendor-source-manifest.json records the verified source file hashes.
+
+Dataset recordings, annotations and model weights are NOT distributed by this
+repository and are NOT relicensed by this code license. Obtain them from the
+original publishers under their respective terms. The pilot references
+EmotionTalk and SmoothConv; their cards and applicable terms must be retained
+alongside privately acquired data. No trained model is released here.
