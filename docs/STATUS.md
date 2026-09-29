@@ -27,3 +27,9 @@ The above describes private execution receipts on NAS; raw receipts and samples 
 - NAS intermittent latency occurred; successful small reads do not establish a root-cause fix.
 
 There is no running production job in the original handoff. The scheduled task is paused by user request. Do not resume it automatically.
+
+## Acting-first follow-up
+
+The user chose expressive performance as the first priority. S01–S08 remain expressive candidates, while S09/S10 retain a separate interaction-check purpose. This choice does not approve any samples for training.
+
+Actual receipt inspection found 19 of the 20 expressive reconstructions used the target utterance itself as the reference. Original utterance labels are 12 neutral, 3 sad, 4 angry and 1 fearful; scene-level categories must not replace these labels. Four fixed-target-token, independent same-speaker neutral-labelled reference controls actually completed on CPU: sad 15.56s, angry 9.64s, fearful 4.80s, suppression candidate 6.72s (36.72s total). All four used different utterances and text; pre-save clipped fraction was zero. The acting packet verified original/reconstruction/reference WAV hashes and formats plus target-code identity, and read back its JSON/HTML. It contains 20 utterances (61.3518125s original audio); all 48 audio links resolve to existing NAS files. Twelve targeted tests passed (8 public-workflow protections and 4 reference-selection tests). No new training, listening approval, blind evaluation or broad regression was performed. The page was prepared and opened for user review; actual browser audio playback has not been tested.

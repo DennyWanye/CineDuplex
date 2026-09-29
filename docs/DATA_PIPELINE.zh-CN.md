@@ -138,3 +138,25 @@ python3 -B -m cineduplex.data.workflow status --root "$CINEDUPLEX_ROOT"
 - 源hash、版本或音频格式不符：停止，保留失败记录，不覆盖旧数据掩盖差异。
 - 新的公开workflow封装已做语法/针对性单测及现有包只读状态检查；**没有在发布时重跑全部下载和音频生产**。其底层步骤的原执行实证与新机器复现必须分别报告。
 - 原私人环境的定时任务已暂停。接手只执行用户明确授权的工作，不自动恢复旧P0或训练。
+
+## 8. 表演优先：独立参考重建与试听
+
+用户已选择第一阶段优先表演感。原S01–S08的20个话段中，19个旧重建使用目标原句本身作参考；这不足以排除参考条件传递表演的影响。以下是四个固定目标token的补充对照，**不重编码、不训练、不覆盖旧音频**。
+
+```sh
+"$CINE_PY" -B -u -m cineduplex.data.codec_decode_cpu \
+  --root "$CINEDUPLEX_ROOT" --output-relative output/pilot10-current \
+  --prompt-policy independent-neutral \
+  --destination-relative output/acting-neutral-control-v1 \
+  --utterance G00002_10_08_002 --utterance G00002_13_08_006 \
+  --utterance G00002_15_07_005 --utterance G00002_05_07_002
+python3 -B -u -m cineduplex.data.acting_review --root "$CINEDUPLEX_ROOT"
+```
+
+运行前查现有进程和输出。独立参考模式拒绝覆盖已有WAV/收据；中断后只传缺失的utterance，不删除旧产物绕过检查。分批运行的decode-summary仅含本次批次；每话段收据和试听包逐条核验才是全部完成的依据。
+
+参考必须来自同source revision、同split group、同speaker，且不同场景、不同文本，无标注重叠，原标签neutral；排除suppression候选场景。找不到则失败，不能回退原句。neutral是来源标注，尚非听审结论。
+
+试听入口：`output/acting-review-v1/review.html`；`packet.json`保留20话段来源、原情绪、时间、原有/新对照收据。生成器校验原音/重建/参考的SHA与WAV格式、固定目标codes身份，并实际读回JSON/HTML。它不修改原听审队列，不批准训练。
+
+先听前四项的原音、旧重建、新重建，分别反馈文字、声线、情绪/节奏保留和噪声。页面是有提示的诊断试听，不是随机盲测。参考音频特征、prompt token、speaker embedding一起变化，不能把全部差异归因于其中一个因素。S08仍是neutral原标签，不可把它的对照制作成功当作压抑确认；正式效果需要后续独立测试。

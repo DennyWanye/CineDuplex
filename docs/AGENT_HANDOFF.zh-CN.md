@@ -9,8 +9,9 @@
 
 - 首批目标是10场景，覆盖 neutral/sadness/anger/fear/suppression/interrupt/backchannel。
 - 当前有8个表达性话段场景和2个真实双声道候选；没有10个完整双工场景验收结论。
-- 用户已收到两项待答事项：关键音频听审；是否接受“8表达性+2双工候选”作为首批流程验证，还是继续找材料替换为10个完整双工场景。
-- 没有答复不算批准。S08仍是neutral原标签/压抑caption线索。
+- 用户于2026-09-29明确选择：第一阶段优先“说得更有表演感”。按用途保留8个表达性场景与2个双工候选，不再以全部替换成完整双工为默认方向。
+- 该方向选择不等于听审通过或数据训练批准。S08仍是neutral原标签/压抑caption线索；S09/S10保留交互检查用途，尚未验收。
+- 表演资料新增核验重点：固定目标token，改用同说话人的另一句neutral标注参考做CPU重建；比较原音、旧重建和新参考重建。原20话段中19个旧重建为原句自参考，不足以单独证明表演信息保留。
 - 用户要求暂停原定时任务，已经暂停。不要恢复计划任务，不接管DGX生产服务，不启动训练。
 - 本仓库发布不表示数据获准训练，也不表示委派了一个已经运行的Agent。
 
@@ -25,12 +26,14 @@
 | `output/pilot10-loader-input/` | 额外S09连续输入与14行真实loader诊断 |
 | `output/source-audit/` | 原声道及筛选证据 |
 | `output/pilot10-current/` | 当前统一审阅入口、28话段HF格式和韵律 |
+| `output/acting-neutral-control-v1/` | 4个已完成的同说话人独立neutral标注参考重建及逐段收据 |
+| `output/acting-review-v1/` | 表演优先试听页review.html及20话段packet.json；前4项三路对照 |
 
 关键证据：`frontend-reference-check.json`、`hf-review-readback.json`、`prosody-readback.json`，以及loader-input下的`loader-all-scenes-diagnostic.json`。证据若缺失，不从文档文字推断当前机器也通过。
 
 ## 可直接给 Agent 的任务文本
 
-> 请先阅读 AGENTS.md、docs/AGENT_HANDOFF.zh-CN.md、docs/DATA_PIPELINE.zh-CN.md 和 docs/STATUS.md。同一环境还要读私人 EXECUTION_CHECKPOINT.md。先检查现有任务、真实NAS挂载及产物，报告哪些步骤已经有实际证据、哪些缺失，只执行我授权的缺失步骤。所有新下载/缓存/临时文件/产物只存真实NAS；不重复运行生产器，不恢复定时任务、不操作DGX生产服务、不训练。保持来源许可、固定版本、原文、样本时间与hash；不得把混音或补零当独立声轨，不用HumDial测试集训练，不凭文字或特征冒称听过压抑表达。若涉及8个表达性场景与10个完整双工场景的范围选择，先读取我的最新决定，不自行代选。完成后给出实际产物路径、执行命令、通过证据及剩余限制。
+> 请先阅读 AGENTS.md、docs/AGENT_HANDOFF.zh-CN.md、docs/DATA_PIPELINE.zh-CN.md 和 docs/STATUS.md。同一环境还要读私人 EXECUTION_CHECKPOINT.md。第一阶段优先表演感，按表达性/双工用途分别整理，方向选择不等于样本获准训练。先检查现有任务、真实NAS挂载及产物，报告哪些步骤已经有实际证据、哪些缺失，只执行我授权的缺失步骤。所有新下载/缓存/临时文件/产物只存真实NAS；不重复运行生产器，不恢复定时任务、不操作DGX生产服务、不训练。保持来源许可、固定版本、原文、样本时间与hash；不得把混音或补零当独立声轨，不用HumDial测试集训练，不凭文字或特征冒称听过压抑表达。完成后给出实际产物路径、执行命令、通过证据及剩余限制。
 
 ## 公开版本的验证
 

@@ -26,8 +26,45 @@ WEIGHTS = {
 WEIGHT_BYTES = {'campplus.onnx': 28303423, 'flow.pt': 623466603, 'hift.pt': 83390254}
 
 
-def decode(root, scene_id=None, output_rel="output/pilot10"):
+def neutral_reference(indexed, scene, turn):
+    """Source-labelled control only; never imply the reference was heard."""
+    candidates = [(s, t) for s, t in indexed
+        if s['source_revision'] == scene['source_revision']
+        and s.get('split_group') and s['split_group'] == scene.get('split_group')
+        and s['scene_id'] != scene['scene_id']
+        and s['coverage_requested'] != 'suppression'
+        and t['speaker_id'] == turn['speaker_id']
+        and t['utterance_id'] != turn['utterance_id']
+        and t['text'].strip() != turn['text'].strip()
+        and t.get('original_emotion', t['emotion']) == 'neutral'
+        and not t.get('overlaps')
+        and 1 <= (t['end_sample']-t['start_sample'])/16000 <= 12]
+    if not candidates:
+        raise ValueError('no independent same-speaker neutral reference; no self fallback')
+    return max(candidates, key=lambda pair: pair[1]['end_sample']-pair[1]['start_sample'])
+
+
+def decode(root, scene_id=None, output_rel="output/pilot10", *,
+           prompt_policy='legacy', utterance_ids=None, destination_rel=None):
     root=nas_root(root)
+    if prompt_policy not in {'legacy', 'independent-neutral'}:
+        raise ValueError('unsupported prompt policy')
+    out=safe_child(root,output_rel)
+    scenes=[json.loads(s) for s in (out/'scenes.jsonl').read_text().splitlines()]
+    indexed=[(s,t) for s in scenes for t in s['turns']]
+    selected=[(s,t) for s,t in indexed if (not scene_id or s['scene_id']==scene_id)
+              and (not utterance_ids or t['utterance_id'] in utterance_ids)]
+    if not selected or (utterance_ids and set(utterance_ids) != {t['utterance_id'] for s,t in selected}):
+        raise ValueError('requested utterances missing from scene selection')
+    destination=safe_child(root,destination_rel) if destination_rel else out
+    if prompt_policy == 'independent-neutral':
+        if not destination_rel or destination == out:
+            raise ValueError('control requires a separate output directory')
+        for s,t in selected:
+            neutral_reference(indexed,s,t)
+            dest=safe_child(destination,s['scene_id']+'/'+t['utterance_id']+'.reconstructed.wav')
+            if dest.exists() or dest.with_suffix('.json').exists():
+                raise ValueError('existing control must be inspected, not overwritten')
     for key, value in {'TMPDIR': root/'tmp', 'NUMBA_CACHE_DIR': root/'cache/numba',
                        'TORCH_HOME': root/'cache/torch', 'HF_HOME': root/'cache/huggingface',
                        'TORCHINDUCTOR_CACHE_DIR': root/'cache/torchinductor'}.items():
@@ -73,11 +110,9 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
     opts=ort.SessionOptions();opts.intra_op_num_threads=2;opts.inter_op_num_threads=1
     spk_model=ort.InferenceSession(verified_bytes('campplus.onnx'),sess_options=opts,providers=['CPUExecutionProvider'])
     print('decode: all pinned models strictly loaded on CPU',flush=True)
-    out=safe_child(root,output_rel)
-    scenes=[json.loads(s) for s in (out/'scenes.jsonl').read_text().splitlines()]
-    indexed=[(s,t) for s in scenes for t in s['turns']]
     def tokens(scene, turn):
-        result=json.loads((out/scene['scene_id']/(turn['utterance_id']+'.tokens.json')).read_text())
+        source=safe_child(root,turn['audio']['path'])
+        result=json.loads(source.with_name(source.stem+'.tokens.json').read_text())
         if result['input_sha256']!=turn['audio']['sha256'] or result['model_sha256']!=MODEL_SHA:
             raise ValueError('tokens do not match source audio or pinned encoder')
         codes=result['raw_codes']
@@ -106,8 +141,7 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
         prompt_cache[key]=result
         return result
     records=[]
-    for scene,turn in indexed:
-        if scene_id and scene['scene_id']!=scene_id:continue
+    for scene,turn in selected:
         codes=tokens(scene,turn)
         candidates=[(s,t) for s,t in indexed if s['source_revision']==scene['source_revision']
             and t['speaker_id']==turn['speaker_id'] and t['utterance_id']!=turn['utterance_id']
@@ -117,7 +151,10 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
             and not t.get('overlaps')]
         # Same-utterance conditioning is allowed for a reconstruction diagnostic
         # but is explicitly distinguished from an independent reference.
-        ps,pt=max(candidates,key=lambda pair:pair[1]['end_sample']-pair[1]['start_sample']) if candidates else (scene,turn)
+        if prompt_policy == 'independent-neutral':
+            ps,pt=neutral_reference(indexed,scene,turn)
+        else:
+            ps,pt=max(candidates,key=lambda pair:pair[1]['end_sample']-pair[1]['start_sample']) if candidates else (scene,turn)
         prompt_codes,prompt_lengths,embedding,mels,mel_lengths=prompt(ps,pt)
         torch.manual_seed(0)
         started=time.monotonic()
@@ -132,7 +169,8 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
         rms=float(np.sqrt(np.mean(pcm.astype(np.float64)**2)))
         if rms<1e-5:raise ValueError('decoder produced effectively silent output')
         nas_root(root)
-        dest=out/scene['scene_id']/(turn['utterance_id']+'.reconstructed.wav')
+        dest=safe_child(destination,scene['scene_id']+'/'+turn['utterance_id']+'.reconstructed.wav')
+        dest.parent.mkdir(parents=True,exist_ok=True)
         partial=dest.with_name(dest.stem+'.partial.wav')
         sf.write(partial,pcm,24000,subtype='PCM_16')
         with partial.open('rb') as f:os.fsync(f.fileno())
@@ -145,13 +183,17 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
             token_count=len(codes),prompt_utterance_id=pt['utterance_id'],
             prompt_source_emotion=pt['emotion'],prompt_scene_id=ps['scene_id'],
             same_utterance_prompt=pt['utterance_id']==turn['utterance_id'],
+            prompt_policy=prompt_policy,prompt_audio=pt['audio'],
+            target_audio=turn['audio'],target_codes_sha256=hashlib.sha256(
+                json.dumps(codes,separators=(',',':')).encode()).hexdigest(),
+            prompt_text_differs=pt['text'].strip()!=turn['text'].strip(),
             prompt_channel_isolation_verified=False,rms=rms,clipped_fraction=float(np.mean(np.abs(pcm)>=1)),
             elapsed_seconds=time.monotonic()-started,runtime='pytorch-cpu-float32',
             strict_state_load=True,upstream_cuda_output_parity='NOT_VERIFIED',auditory_review='NOT_PERFORMED',training_ready=False)
         write_json(dest.with_suffix('.json'),result);records.append(result)
-        write_json(out/'decode-progress.json',dict(reconstructed=len(records),requested_scene=scene_id,training_ready=0))
+        write_json(destination/'decode-progress.json',dict(reconstructed=len(records),requested_scene=scene_id,training_ready=0))
         print(f"{scene['scene_id']} {turn['utterance_id']}: reconstructed {duration:.2f}s; listening QA pending",flush=True)
-    write_json(out/('decode-summary-'+scene_id+'.json' if scene_id else 'decode-summary.json'),dict(
+    write_json(destination/('decode-summary-'+scene_id+'.json' if scene_id else 'decode-summary.json'),dict(
         records=records,weights=WEIGHTS,training_ready=0,scope='actual CPU reconstruction candidates; no auditory or CUDA-parity approval'))
     return records
 
@@ -159,4 +201,8 @@ def decode(root, scene_id=None, output_rel="output/pilot10"):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--scene')
     parser.add_argument('--output-relative',default='output/pilot10')
-    args=parser.parse_args();decode(args.root,args.scene,args.output_relative)
+    parser.add_argument('--prompt-policy',choices=['legacy','independent-neutral'],default='legacy')
+    parser.add_argument('--utterance',action='append')
+    parser.add_argument('--destination-relative')
+    args=parser.parse_args();decode(args.root,args.scene,args.output_relative,
+        prompt_policy=args.prompt_policy,utterance_ids=args.utterance,destination_rel=args.destination_relative)
