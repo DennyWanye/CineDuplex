@@ -135,7 +135,7 @@ function initialReserve(reply){
   .6+Math.max(.25,rate-1)*(estimatedSeconds-1)*1.5));
 }
 function newReply(e){return {id:e.event_id,chunks:[],length:0,totalLength:0,packets:0,rate:e.sample_rate||24000,
- epoch:e.epoch,firstAt:performance.now(),streaming:!!e.streaming,started:false,finished:false,nodes:0,completed:false,
+ epoch:e.epoch,firstAt:performance.now(),streaming:!!e.streaming&&e.response_complete!==true,completeAvailable:e.response_complete===true,started:false,finished:false,nodes:0,completed:false,
  target:1.0,initialLead:.85,lastAudioAt:null,ratios:[],rebuffering:false};}
 function receiveAudio(e){
  if(!context||e.epoch<epoch)return;
@@ -190,7 +190,7 @@ function scheduleReply(reply){
  const node=context.createBufferSource();node.buffer=audio;node.connect(playbackBus||context.destination);
  if(playbackBridge)playbackBridge.player.muted=false;
  if(!reply.started){
-  reply.initialLead=initialReserve(reply);
+  reply.initialLead=reply.finished?.04:initialReserve(reply);
   diagnostic('initial_buffer',{event_id:reply.id,lead_seconds:reply.initialLead,producer_ratio:producerRatio});
   lastBufferWait=(performance.now()-reply.firstAt)/1000+(reply.finished?.04:reply.initialLead);
   event('开始播放回答 · 模型开口至播放 '+lastBufferWait.toFixed(1)+' 秒');reply.started=true;
@@ -242,6 +242,7 @@ async function poll(id){
     if(e.type==='session_warning'){$('response-warning').hidden=false;$('response-warning').textContent=e.message;event(e.message);}
     if(e.type==='guardrail_pending'){$('guardrail-status').textContent=e.message;}
     if(e.type==='guardrail_pass'){$('guardrail-status').textContent=e.message;}
+    if(e.type==='guardrail_cancelled'){$('guardrail-status').textContent=e.message;event(e.message);}
     if(e.type==='guardrail_block'){clearPlayback();$('guardrail-status').textContent=e.message;error(e.message);event(e.message);}
     if(e.type==='stop_audio'){epoch=e.epoch;clearPlayback();updateAudioStatus();event('模型回到聆听，已清空待播放声音');}
     if(e.type==='state_change'){nativeState=e.to;showState();event(states[e.to]||e.to);}

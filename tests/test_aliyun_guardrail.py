@@ -187,6 +187,29 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.call.reason, 'guardrail_blocked')
         self.assertTrue(any(e['type'] == 'stop_audio' for e in self.call.events))
 
+    def test_approved_whole_answer_is_marked_complete_for_playback(self):
+        gate = self.make_gate(); answer(gate)
+        wait_for(lambda: any(e['type'] == 'audio_end' for e in self.call.events))
+        start = next(e for e in self.content() if e['type'] == 'audio_start')
+        self.assertFalse(start['streaming'])
+        self.assertTrue(start['response_complete'])
+        types = [e['type'] for e in self.call.events]
+        phases = [e['phase'] for e in self.call.events if e['type'] == 'guardrail_pending']
+        self.assertEqual(phases, ['generating', 'reviewing'])
+        self.assertLess(types.index('guardrail_result'), types.index('audio_start'))
+
+    def test_native_cancel_is_visible_and_never_releases_held_pcm(self):
+        gate = self.make_gate()
+        gate.intercept({'type': 'event_start', 'event_id': 'evt-1'})
+        gate.intercept({'type': 'audio', 'event_id': 'evt-1', 'epoch': 0, 'sample_rate': 24000,
+                        'pcm': base64.b64encode(b'\x01\x00' * 24).decode()})
+        gate.intercept({'type': 'event_end', 'event_id': 'evt-1', 'interrupt': True})
+        self.call.epoch = 1; gate.intercept({'type': 'stop_audio', 'epoch': 1})
+        cancelled = [e for e in self.call.events if e['type'] == 'guardrail_cancelled']
+        self.assertEqual(len(cancelled), 1)
+        self.assertEqual(self.content(), [])
+        self.assertEqual(self.client.text_requests, [])
+
     def test_timeout_or_unexpected_exception_blocks_without_leaking(self):
         gate = self.make_gate(FakeClient(text_error=RuntimeError('secret-provider-body'))); answer(gate)
         wait_for(self.call.closed.is_set)

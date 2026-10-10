@@ -25,18 +25,44 @@ import torch.distributed as dist
 
 LEADER=3
 TP_GROUP=None
-CALL_RUNTIME_SHA='9f03c2235d518dc045d66d66cf2409662be346f2b988442a79424013d37472ed'
+CALL_RUNTIME_NAME='call-runtime-v44.py'
+CALL_RUNTIME_SHA='241722280fba90e765257a304685f836b42d91ec1a5efc2b78515b08e4c5da29'
+GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v2.json'
+GUARDRAIL_BUNDLE_SHA='236d1f603c47d16dd3bc525941575180a0a9e4b270c62972b4cf0b53d018b3e9'
 
 def install_call_runtime(root):
-    path=Path(root)/'call-runtime-v42.py';source=path.read_bytes()
+    path=Path(root)/CALL_RUNTIME_NAME;source=path.read_bytes()
     if hashlib.sha256(source).hexdigest()!=CALL_RUNTIME_SHA:raise ValueError('call runtime source identity')
     if dist.get_rank()!=LEADER:return
+    import sys
+    bundle_path=Path(root)/GUARDRAIL_BUNDLE_NAME;raw=bundle_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=GUARDRAIL_BUNDLE_SHA:raise ValueError('guardrail bundle identity')
+    package=types.ModuleType('cineduplex.guardrail');package.__path__=[]
+    sys.modules['cineduplex.guardrail']=package
+    for name,record in json.loads(raw).items():
+        if hashlib.sha256(record['source'].encode()).hexdigest()!=record['sha256']:raise ValueError('guardrail module identity')
+        module=types.ModuleType(name);module.__package__='cineduplex.guardrail';sys.modules[name]=module
+        exec(compile(record['source'],'guardrail-memory://'+name,'exec'),module.__dict__)
     import cineduplex.train.realtime_service as runtime
     if getattr(runtime,'_call_runtime_sha',None)==CALL_RUNTIME_SHA:return
     module=types.ModuleType('cineduplex.train.call_runtime_update');module.__package__='cineduplex.train'
     exec(compile(source,str(path),'exec'),module.__dict__)
     module.StageMeter=runtime.StageMeter
     runtime.Call=module.Call;runtime._call_runtime_sha=CALL_RUNTIME_SHA
+    previous=runtime.Application.start
+    def guarded_start(app,*args,**kwargs):
+        if getattr(runtime,'_call_runtime_sha',None)==CALL_RUNTIME_SHA:
+            client=getattr(app.tensor_parallel,'guardrail_client',None)
+            if client is None:
+                client=getattr(app,'guardrail_client',None)
+            if client is None:raise RuntimeError('安全护栏凭据尚未就绪，请稍后再连接')
+            if app.identity.get('guardrail',{}).get('enabled') and not client.config.enabled:
+                raise RuntimeError('安全护栏不得在运行更新时降级为关闭')
+            app.guardrail_client=client
+            app.identity['guardrail']=client.config.status()
+            app.identity['guardrail_runtime_sha256']=CALL_RUNTIME_SHA
+        return previous(app,*args,**kwargs)
+    runtime.Application.start=guarded_start
 
 # Existing Coordinators execute a pinned update module before replacing their
 # class. Install Call before the next Application.start constructs a session.
@@ -257,6 +283,20 @@ class Coordinator:
         return states
 
     def update(self,spec):
+        if 'guardrail_credentials' in spec:
+            if self.rank!=LEADER:raise RuntimeError('guardrail leader required')
+            name=spec.get('name','')
+            if not (name.startswith('tp-runtime-v') and name.endswith('.py') and name[12:-3].isdigit()):
+                raise RuntimeError('guardrail runtime identity')
+            if hashlib.sha256((self.root/name).read_bytes()).hexdigest()!=spec.get('sha256'):
+                raise RuntimeError('guardrail source identity')
+            from cineduplex.guardrail.aliyun_guardrail import Config,AliyunGuardrail
+            value=spec['guardrail_credentials']
+            if not isinstance(value,dict) or set(value)!={'access_key_id','access_key_secret'}:
+                raise RuntimeError('invalid guardrail credential schema')
+            self.guardrail_client=AliyunGuardrail(Config(enabled=True,input_audio=False,output_audio=False,
+                access_key_id=value['access_key_id'],access_key_secret=value['access_key_secret']))
+            return [{'rank':self.rank,'guardrail_configured':True,'input_audio':False,'output_audio':False}]
         if not hasattr(self,'command_lock'):self.command_lock=threading.RLock()
         with self.command_lock:
             self.in_call=True
@@ -300,9 +340,9 @@ class Coordinator:
         install_call_runtime(self.root)
         # Update the native state-machine adapter on all admitted ranks,
         # including existing framework objects, without reloading weights.
-        policy_path=self.root/'native-turn-policy-v6.py'
+        policy_path=self.root/'native-turn-policy-v7.py'
         policy_source=policy_path.read_bytes()
-        policy_sha='e28a71299b6124f09d34d039da6e210c6dc291bc5ed14fcc48fc1192bb566ecc'
+        policy_sha='d0232502c2cdbb23339f723b811803c4d1f7e12dcf1bec7411363b3d0a5e5fd9'
         if hashlib.sha256(policy_source).hexdigest()!=policy_sha:
             raise ValueError('native turn policy source identity')
         policy=types.ModuleType('cineduplex_native_turn_policy')

@@ -1,5 +1,25 @@
 # Capability and verification status
 
+## 2026-10-11 turn-boundary and whole-response playback deployment
+
+The candidate remembers acoustic completion across native tail padding,
+retains explicit interruption and unfinished-response cancellation, and
+records input energy for diagnosis without treating it as speech detection.
+Aliyun review still precedes all answer text/audio release. Completed,
+approved PCM is collected through `audio_end` and scheduled with a 40ms lead;
+this is not end-to-end conversational latency. Offline boundary, guardrail
+and playback checks are separate from deployment and human acceptance.
+The update was activated on the original four resident processes after explicitly
+authorized admission and storage/transport recovery; no model process was launched.
+A 55.2-second replay through the deployed entry produced two answers and four
+fully played audio packets. Both answers had actual Aliyun pass receipts before
+any answer content was released; both completed playback nodes used a 40ms lead.
+A controlled risk fixture through the same guard code received an actual Aliyun
+block and released no answer content. This is not a public voice risk test.
+The acoustic EOS-to-PAD edge is covered offline; the normal replay did not prove
+that edge occurred live. Real-human microphone latency and listening acceptance
+remain pending.
+
 ## 2026-10-10 training and realtime source release
 
 This repository now includes the training controller/workers, NAS transport,

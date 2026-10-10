@@ -114,7 +114,7 @@ class CallGuardrail:
             with self.lock:
                 for key, pending in list(self.responses.items()):
                     if pending.epoch < event['epoch']:
-                        self._remove(key)
+                        self._cancel(key)
             return False
         if kind not in self.CONTENT:
             return False
@@ -136,7 +136,8 @@ class CallGuardrail:
                 pending = PendingResponse(key, epoch)
                 self.responses[key] = pending
                 self.call._emit({'type': 'guardrail_pending', 'event_id': event_id,
-                                 'message': '正在审核回答，文字和声音将在通过后一起发送。'})
+                                 'phase': 'generating',
+                                 'message': '正在生成回答，完成并通过安全审核后播放。'})
             if pending.queued:
                 self._deny('output', 'content_after_response_end', key); return True
             value = dict(event)
@@ -160,7 +161,7 @@ class CallGuardrail:
                     self._deny('output', 'invalid_audio', key); return True
             if kind == 'event_end':
                 if event.get('interrupt'):
-                    self._remove(key); return True
+                    self._cancel(key); return True
                 pending.text_done = True
             if kind in ('audio_end', 'response_warning'):
                 pending.audio_done = True
@@ -171,6 +172,9 @@ class CallGuardrail:
                 pending.input_barrier = self._queue_input() if self.config.input_audio else 0
                 pending.queued = True
                 try:
+                    self.call._emit({'type': 'guardrail_pending', 'event_id': event_id,
+                                     'phase': 'reviewing',
+                                     'message': '回答已生成，正在进行阿里云安全审核。'})
                     self.output_queue.put_nowait(pending)
                 except queue.Full:
                     self._deny('output', 'review_backlog', key)
@@ -180,6 +184,15 @@ class CallGuardrail:
         pending = self.responses.pop(key, None)
         if pending is not None:
             self.pending_bytes -= pending.size; self.event_count -= len(pending.events)
+
+    def _cancel(self, key):
+        pending = self.responses.get(key)
+        if pending is not None:
+            self.call._emit({'type': 'guardrail_cancelled', 'event_id': key,
+                             'reason': 'native_interrupt',
+                             'held_ms': round((time.monotonic() - pending.started) * 1000, 1),
+                             'message': '模型中断了尚未播放的回答，正在继续聆听。'})
+            self._remove(key)
 
     def _input_loop(self):
         while not self.closed.is_set() and not self.call.closed.is_set():
@@ -249,10 +262,16 @@ class CallGuardrail:
                     if self.responses.get(pending.event_id) is not pending or pending.epoch != self.call.epoch:
                         continue
                     self.call._emit({'type': 'guardrail_pass', 'event_id': pending.event_id,
+                                     'response_complete': True,
                                      'message': '回答已通过已启用的安全审核。'})
                     for event in pending.events:
                         if self.closed.is_set() or self.call.closed.is_set() or pending.epoch != self.call.epoch:
                             break
+                        # Both channels are complete before this worker runs.
+                        # Tell the browser to collect the full approved PCM,
+                        # instead of reserving time for future generation.
+                        if event.get('type') == 'audio_start':
+                            event = {**event, 'streaming': False, 'response_complete': True}
                         self.call._emit(event)
                     self._remove(pending.event_id)
             except Exception as exc:
