@@ -51,3 +51,13 @@ vendor/lychee-fd-network-incomplete/
 
 # Public guardrail documentation; credentials and deployment state remain private.
 !/docs/ALIYUN_GUARDRAIL.zh-CN.md
+
+# Published training/realtime source; private deployment state stays ignored.
+!/docs/TRAINING_REALTIME.zh-CN.md
+!/src/cineduplex/train/
+/src/cineduplex/train/*
+!/src/cineduplex/train/*.py
+!/src/cineduplex/cluster/
+/src/cineduplex/cluster/*
+!/src/cineduplex/cluster/__init__.py
+!/src/cineduplex/cluster/guard.py

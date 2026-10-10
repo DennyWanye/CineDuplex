@@ -1,0 +1,63 @@
+# 训练与全双工通话源码接续
+
+本次发布保存训练、离线对比和实时通话的实际源码，不启动任务，也不改变现有运行服务。模型使用 BF16；实时路径不使用权重或激活量化。数据、模型、检查点、通话录音、日志、凭据和机器配置均由运行环境提供，不纳入 Git。
+
+## 代码入口
+
+| 范围 | 入口 | 用途 |
+|---|---|---|
+| 训练启动 | `scripts/run_overnight.py` | 一次新运行，先准备实际 Dataset/collator 输入，再训练；保存原控制器身份和 NAS 状态 |
+| 四节点训练 | `src/cineduplex/train/four_controller.py`、`four_worker.py` | 既有 Gateway 准入、节点身份检查、NAS 源码打包、LoRA 训练及检查点 |
+| 输入准备 | `export_bulk.py`、`export_memory.py` | 固定来源的实际 vendor Dataset/collator；不能代替听审或用途批准 |
+| 离线对比 | `src/cineduplex/web/server.py`、`index.html` | 上传音频、查看真实任务状态、比较基础模型和训练后输出 |
+| 原生通话 | `realtime_service.py`、`tensor_parallel.py` | 模型原生听说控制、持续输入、增量文本与声音、取消和停止 |
+| 浏览器通话 | `src/cineduplex/web/realtime_server.py`、`realtime.html`、`realtime.js`、`capture.worklet.js` | 持续麦克风、上传序号去重、增量播放、重连与客户端事件 |
+| 性能实现 | `bf16_kernels.py`、`bf16_tp_kernels.py`、`append_cache.py`、`audio_embedding_slice.py`、`generation_stream.py` | 保持 BF16 的投影、缓存与流式 codec 优化 |
+| 定向诊断 | `scripts/qualify_realtime_tp.py`、`audit_realtime_call.py`、`audit_rank_windows.py` | 停止资格、窗口耗时、音频边界和四 rank 时序；不自动批准主观音质 |
+| 更新和恢复 | `scripts/update_realtime_runtime.py`、`restore_realtime_web_storage.py` 等 | 原服务空闲、来源身份匹配、Gateway 准入后更新；保留旧源和回退容器 |
+
+Python 模块从 `src` 导入，操作脚本保留在 checkout：
+
+```sh
+export PYTHONPATH="$PWD/src"
+export PYTHONDONTWRITEBYTECODE=1
+```
+
+包配置包含 `train`、`web` 和 Gateway 守卫，以及页面所需 HTML/JS。训练控制器还读取仓库里的固定 vendor 源和来源清单，因此应从完整 checkout 操作，不把仅安装 Python 包当作完整 DGX 部署。
+
+## 运行条件和配置
+
+这些脚本面向原执行环境，并非任意机器的一键安装器。GPU 依赖、CUDA、NCCL Mesh、SSHFS、codec、tokenizer 和基础权重均需已准备且匹配。CPU 数据环境见 `requirements-codec-cpu.txt`；不能用该文件证明 GPU 环境已完成。此发布不安装依赖或下载权重。
+
+私人 JSON 配置至少描述以下资源，具体必需字段以对应入口为准：
+
+- `nas`：主机、SSH 身份路径、真实根目录和文件系统 UUID。
+- `cluster.lease`：既有 Gateway 的准入身份、generation、令牌文件路径和数据库。代码核对既有准入，不自行创建第二套资源权限。
+- `nodes`：四 rank 的地址、SSH alias、hostname、user；实际身份须匹配。
+- `run_prefix`、`training_attempt`：NAS 上的唯一运行目录；已存在的原任务必须接续核查，不能换目录重复提交。
+- `input_files`：实际训练与评估 JSONL 的来源、数量和固定身份。
+- 模型 manifest、原 tokenizer、loader SHA、训练参数，以及 NAS Python/SFTP 路径。
+
+配置使用 `*.local.json` 并保持忽略。不要将令牌、密钥或私人配置复制到文档。所有数据、缓存、临时文件、日志和模型输出必须留在真实 NAS；挂载丢失时拒绝本机回退。
+
+部署/恢复脚本保留原环境的端口、容器、镜像摘要、源码版本和任务身份保护。一些入口要求历史冻结源与恢复收据；它们不能在新机器上直接执行。重新部署须按实际环境配置并核实原任务，不能删除检查来强行运行。`run_realtime_tp.py` 的 `--recover-v49` 是原环境恢复入口，不是通用初次启动命令；最新本地 bootstrap 改动尚未完成新的冷启动验证。
+
+## 两个测试页面
+
+离线对比页面按完整音频提交任务，适合比较模型输出。全双工页面保持麦克风输入，并在模型说话时继续收音与播放；两者用途不同。浏览器麦克风需要安全上下文：本机 localhost 或设备信任的 LAN HTTPS。不要用忽略证书错误代替设备信任，不默认开放公网。
+
+模型状态来自实际后端。后端或 NAS 未就绪时显示未就绪，不能生成模拟成功结果。后台记录实际输入/输出、事件、序号、模型版本和窗口耗时，浏览器上传客户端播放及错误事件。它们保存在运行 NAS；录音及对话属于私人数据，不发布。
+
+## 已有验证和剩余限制
+
+原环境完成本次训练，实时服务使用 step 3222 的 LoRA，并以 25% 比例合并到 BF16 推理权重。训练完成不等于质量获批。
+
+本轮正式通话测试使用合成录音实时回放：292 秒、730 输入包、10 个回答、29 音频块全部播放，记录中的模型错误、客户端错误和补缓冲次数均为 0。说话窗口平均耗时 476.78 ms，窗口预算 400 ms，持续实时速度仍未达标。同 66 秒短录音的三个完整回答，模型开口至浏览器计划首声平均从 3.444 秒降到 3.341 秒；不是真人说完到扬声器的完整时延。
+
+PCM 没有检测到削波，不能由此推断没有背景噪音或声音自然。主观听审、真人长通话、麦克风回声场景和新机器完整复现尚未通过。上述是原运行证据的摘要，原始录音和收据不公开。
+
+现有服务运行的是 NAS 上的冻结源码，不随 checkout 或 Git 推送自动更新。保存代码不重启模型、不恢复旧训练、不创建定时任务。操作原服务前读取私人 `docs/EXECUTION_CHECKPOINT.md` 的最新状态，并通过既有 Gateway 核查资源。
+
+## 本次源码发布检查
+
+2026-10-10 从 Git 暂存快照独立检查：136 个 Python 文件语法解析通过，两个网页 JS 文件语法检查通过；8 项公开流程保护测试、23 项护栏测试通过。控制器在不加载 GPU、不访问远程服务的情况下打包 75 个源码模块成功；包配置及页面资源已核对。待发布文件未包含语料、权重、私人配置或实际凭据。没有重跑模型、浏览器通话或完整 GPU 回归，也没有进行新的冷启动测试。

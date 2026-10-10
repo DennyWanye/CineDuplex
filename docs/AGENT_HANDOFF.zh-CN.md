@@ -1,5 +1,9 @@
 # 给下一位 Agent
 
+## 2026-10-10 代码发布更新
+
+仓库现包含本次训练、离线音频对比和原生全双工通话源码。先读 [训练与实时运行说明](TRAINING_REALTIME.zh-CN.md)。同一环境还须读取私人 `EXECUTION_CHECKPOINT.md`，核查原任务，再处理用户授权的工作；提交源码不会更新运行中的模型。下面的 2026-09 数据 MVP 接续内容是历史资料，不能据其样本数或暂停状态判断今天的训练、服务或授权。
+
 ## 先判断你接手的是哪种环境
 
 1. **同一台 Mac 和现有 NAS：**读本地（不公开）`docs/EXECUTION_CHECKPOINT.md`，然后查看 NAS 的 `output/pilot10-current/summary.json`、`auditory-review-queue.json` 和任务进程。现有包已做完工程诊断，不重跑全流程。

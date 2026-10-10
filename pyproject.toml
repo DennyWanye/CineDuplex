@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cineduplex"
-version = "0.2.0"
-description = "Source-backed emotional speech and duplex data preparation with explicit review gates"
+version = "0.3.0"
+description = "Source-backed speech data preparation, BF16 training, and native full-duplex audio testing"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
@@ -16,4 +16,7 @@ cineduplex = "cineduplex.data.workflow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cineduplex", "cineduplex.data", "cineduplex.guardrail"]
+include = ["cineduplex", "cineduplex.data", "cineduplex.guardrail", "cineduplex.train", "cineduplex.web", "cineduplex.cluster"]
+
+[tool.setuptools.package-data]
+"cineduplex.web" = ["*.html", "*.js"]

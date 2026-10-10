@@ -1,5 +1,21 @@
 # Capability and verification status
 
+## 2026-10-10 training and realtime source release
+
+This repository now includes the training controller/workers, NAS transport,
+BF16 inference and tensor parallel runtime, offline audio comparison app,
+persistent-microphone call page, and deployment/audit helpers.
+No datasets, weights, credentials, private configurations or execution receipts
+are distributed. See [runtime handoff](TRAINING_REALTIME.zh-CN.md).
+
+The original deployment completed training and a prerecorded 292-second call
+(730 input packets, 10 replies, 29 played audio chunks, zero recorded model/client
+errors or rebuffer events). Mean speaking-window compute was 476.78 ms for a
+400 ms window: sustained faster-than-realtime generation has **not** passed.
+Subjective listening and real-human long-call acceptance remain unverified.
+These are historical execution observations, not fresh-checkout reproduction
+or audio-quality approval. The earlier data MVP snapshot below is retained.
+
 Publication snapshot: 2026-09-29. This is a data-preparation MVP.
 
 | Capability | Observed result in the original Mac/NAS environment | Limit |

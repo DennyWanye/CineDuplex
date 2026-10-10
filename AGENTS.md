@@ -3,7 +3,7 @@
 Read README.md, docs/AGENT_HANDOFF.zh-CN.md, docs/DATA_PIPELINE.zh-CN.md,
 and docs/STATUS.md before operating this repository.
 
-- This public release is a data-preparation MVP, not an implemented trainer.
+- This release includes data preparation, training and realtime test source. Publishing code never grants permission to start GPU jobs or resume old automation.
 - Local docs/EXECUTION_CHECKPOINT.md, when present, contains private session state.
   Latest user instructions override historical deployment/lease instructions.
 - The original scheduled job is PAUSED at the user's request. Do not restart it,
