@@ -48,3 +48,6 @@ vendor/lychee-fd-network-incomplete/
 *.pt
 *.safetensors
 *.arrow
+
+# Public guardrail documentation; credentials and deployment state remain private.
+!/docs/ALIYUN_GUARDRAIL.zh-CN.md

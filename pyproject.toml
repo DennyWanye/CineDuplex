@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cineduplex"
-version = "0.1.0"
+version = "0.2.0"
 description = "Source-backed emotional speech and duplex data preparation with explicit review gates"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -16,4 +16,4 @@ cineduplex = "cineduplex.data.workflow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cineduplex", "cineduplex.data"]
+include = ["cineduplex", "cineduplex.data", "cineduplex.guardrail"]
