@@ -98,6 +98,10 @@ def install(native_prefix=False, speech_detector=None):
                     result[:, processor.ss_token_id] = -float('inf')
                     if processor.bc_token_id is not None:
                         result[:, processor.bc_token_id] = -float('inf')
+                elif activity.evidence.reply_overdue(answered_utterance):
+                    result[:, processor.kl_token_id] = -float('inf')
+                    if processor.bc_token_id is not None:
+                        result[:, processor.bc_token_id] = -float('inf')
                 return result
             listening_cls.__call__ = wait_for_turn
         # Preserve strong native interruptions. A marginal SL decision must
@@ -166,6 +170,8 @@ def install(native_prefix=False, speech_detector=None):
                            'active': activity.evidence.active,
                            'utterance': activity.evidence.utterance,
                            'speech_probability': round(activity.evidence.probability, 4),
+                           'quiet_seconds': round(activity.evidence.quiet_frames * .032, 3),
+                           'reply_overdue': activity.evidence.reply_overdue(answered_utterance),
                            'interrupt_playback': bool(started and answered_utterance
                                                       and current.listening_state == 'l')}
             for event in advance(*args, **kwargs):

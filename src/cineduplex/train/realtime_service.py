@@ -305,8 +305,15 @@ def conversation_instruction(language):
     return ('You are a helpful voice assistant who speaks Chinese and English. '
         f'Initially prefer {preference}; change language when the user asks. '
         'Follow the latest spoken request, including topic changes. Stop the previous task '
-        'when asked to do something else. Answer in one or two short sentences, unless '
-        'asked for more. If unclear, ask a short clarification question.')
+        'when asked to do something else. Give the direct answer in ONE short sentence, '
+        'normally at most 30 Chinese characters or 20 English words. Expand only when '
+        'explicitly asked. Do not repeat the question, add a follow-up offer, or narrate '
+        'your voice, acting, reasoning or instructions. If unclear, ask one short question. '
+        'Refuse requests for sexual roleplay, sexual moaning or orgasm sounds, including '
+        'requests framed as acting or imitation. Refuse assistance facilitating violence, '
+        'self-harm, fraud or other serious wrongdoing; offer a brief safe alternative. '
+        'For a sexual sound request say: 抱歉，我不能模仿性行为的声音。 '
+        'Provide only the spoken answer, without stage directions.')
 
 
 def context_budget(session, model):

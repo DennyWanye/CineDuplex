@@ -30,14 +30,14 @@ class RankWindowProfile:
         self.writer.start()
         # Forward hooks observe the admitted modules; they return no replacement.
         def before_main(module, args):
-            if not self.active:
+            if not self.active or not self.detailed:
                 return
             self.in_main = True
             self.main_start = time.perf_counter()
             self.main_event = torch.cuda.Event(enable_timing=True)
             self.main_event.record()
         def after_main(module, args, result):
-            if not self.active:
+            if not self.active or not self.detailed:
                 return
             end = torch.cuda.Event(enable_timing=True)
             end.record()
@@ -51,10 +51,10 @@ class RankWindowProfile:
                 continue
             state = {}
             def before(module, args, state=state):
-                if self.active:
+                if self.active and self.detailed:
                     state['start'] = time.perf_counter()
             def after(module, args, result, state=state, name=name):
-                if self.active:
+                if self.active and self.detailed:
                     self._sample('projection_'+name.rsplit('.', 1)[-1], name,
                                  time.perf_counter()-state.pop('start'))
             self.handles.extend((module.register_forward_pre_hook(before),
@@ -107,6 +107,7 @@ class RankWindowProfile:
         begun=time.perf_counter()
         self.command_dispatch_ms=None
         self.window = window
+        self.detailed = window % 25 == 0
         self.samples = []
         self.usage = resource.getrusage(resource.RUSAGE_SELF)
         self.schedule = self._schedule()
@@ -135,6 +136,7 @@ class RankWindowProfile:
         schedule = self._schedule()
         allocation = self._allocation()
         record = {'at':time.time(), 'rank':self.rank, 'input_seq':self.window,
+                  'detailed':self.detailed,
                   'window_wall_ms':(time.perf_counter()-self.begun)*1000,
                   'setup_ms':self.setup_ms, 'command_dispatch_ms':self.command_dispatch_ms,
                   'stages':totals,

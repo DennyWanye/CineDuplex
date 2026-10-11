@@ -25,14 +25,23 @@ import torch.distributed as dist
 
 LEADER=3
 TP_GROUP=None
-CALL_RUNTIME_NAME='call-runtime-v45.py'
-CALL_RUNTIME_SHA='71d71ca75ab29e25b1eb8a941ae575b71943ae0814430a442902fd5e8767c67a'
-GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v2.json'
-GUARDRAIL_BUNDLE_SHA='236d1f603c47d16dd3bc525941575180a0a9e4b270c62972b4cf0b53d018b3e9'
+CALL_RUNTIME_NAME='call-runtime-v46.py'
+CALL_RUNTIME_SHA='c5adba16b4ff9583a20b6b594c918ad94b92fc69daba927c3a5538caad5a282c'
+GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v3.json'
+GUARDRAIL_BUNDLE_SHA='8cea33dde2f6ae4e577c259d7f50312bf71ca690ca04d3f45c4c1f60fee9e544'
 
 def install_call_runtime(root):
     path=Path(root)/CALL_RUNTIME_NAME;source=path.read_bytes()
     if hashlib.sha256(source).hexdigest()!=CALL_RUNTIME_SHA:raise ValueError('call runtime source identity')
+    # Resident peer_loop frames retain the original function object. Update
+    # its code on every rank, so all four construct exactly the same prefix.
+    import ast
+    import cineduplex.train.realtime_service as runtime
+    instruction=next(node for node in ast.parse(source).body
+                     if isinstance(node,ast.FunctionDef) and node.name=='conversation_instruction')
+    namespace={}
+    exec(compile(ast.Module(body=[instruction],type_ignores=[]),str(path),'exec'),namespace)
+    runtime.conversation_instruction.__code__=namespace['conversation_instruction'].__code__
     if dist.get_rank()!=LEADER:return
     import sys
     bundle_path=Path(root)/GUARDRAIL_BUNDLE_NAME;raw=bundle_path.read_bytes()
@@ -56,6 +65,10 @@ def install_call_runtime(root):
             if client is None:
                 client=getattr(app,'guardrail_client',None)
             if client is None:raise RuntimeError('安全护栏凭据尚未就绪，请稍后再连接')
+            from cineduplex.guardrail.aliyun_guardrail import Config,AliyunGuardrail
+            if client.__class__ is not AliyunGuardrail:
+                client=AliyunGuardrail(Config(**vars(client.config)))
+                app.tensor_parallel.guardrail_client=client
             if app.identity.get('guardrail',{}).get('enabled') and not client.config.enabled:
                 raise RuntimeError('安全护栏不得在运行更新时降级为关闭')
             app.guardrail_client=client
@@ -315,8 +328,8 @@ class Coordinator:
             profile_id=getattr(self,'profile_id',None)
             if profile_id is not None:
                 if getattr(self,'rank_profile',None) is not None:self.rank_profile.close()
-                path=self.root/'rank-window-profile-v2.py';source=path.read_bytes()
-                profile_sha='d3ade5ed27d8f3fff7b70f5efb0b932b024ecfda813479c5d44aede783c07c3a'
+                path=self.root/'rank-window-profile-v3.py';source=path.read_bytes()
+                profile_sha='9390813d39a7764cfc024ed234aa65c58688e1c9dd1ca3471bfcc269fe482f2a'
                 if hashlib.sha256(source).hexdigest()!=profile_sha:raise ValueError('rank profiler source identity')
                 module=types.ModuleType('cineduplex_rank_window_profile')
                 exec(compile(source,str(path),'exec'),module.__dict__)
@@ -340,20 +353,20 @@ class Coordinator:
         install_call_runtime(self.root)
         # Update the native state-machine adapter on all admitted ranks,
         # including existing framework objects, without reloading weights.
-        policy_path=self.root/'native-turn-policy-v9.py'
+        policy_path=self.root/'native-turn-policy-v10.py'
         policy_source=policy_path.read_bytes()
-        policy_sha='e9022d8581b5a6a37ac1ba3e11cb366856f8651db055d796bac7bba4cc78cbcc'
+        policy_sha='a4a01af5f2d4be17eea7892eba9b76febdbd792d0a32a68583d99c354edda6c0'
         if hashlib.sha256(policy_source).hexdigest()!=policy_sha:
             raise ValueError('native turn policy source identity')
         policy=types.ModuleType('cineduplex_native_turn_policy')
         exec(compile(policy_source,str(policy_path),'exec'),policy.__dict__)
         import sys
-        activity_source=(self.root/'speech-activity-v1.py').read_bytes()
-        activity_sha='583080a1cf98af8a6d4f7c790599fa6f0b69da4b02e706513df21a369dadc77e'
+        activity_source=(self.root/'speech-activity-v2.py').read_bytes()
+        activity_sha='df55247ef5b770d60cefb417cc6f27253a09c7b3ebb969fc8632d44609d408d9'
         if hashlib.sha256(activity_source).hexdigest()!=activity_sha:
             raise ValueError('speech activity source identity')
         activity=types.ModuleType('cineduplex.train.speech_activity')
-        exec(compile(activity_source,str(self.root/'speech-activity-v1.py'),'exec'),activity.__dict__)
+        exec(compile(activity_source,str(self.root/'speech-activity-v2.py'),'exec'),activity.__dict__)
         sys.modules[activity.__name__]=activity
         if getattr(model,'_cineduplex_vad_sha',None)!=activity.MODEL_SHA256:
             model._cineduplex_vad_detector=activity.load_detector(self.root/'silero-vad-v1.onnx')

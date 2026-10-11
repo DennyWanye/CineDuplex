@@ -41,7 +41,12 @@ class SpeechEvidence:
 
     def can_reply(self, answered_utterance):
         return (self.utterance > answered_utterance and not self.active
-                and self.quiet_frames >= 10)
+                and self.quiet_frames >= 20)
+
+    def reply_overdue(self, answered_utterance):
+        # A native KL can persist indefinitely after a real question. Admit
+        # SS only after 1.28 s of confirmed silence, never on an empty call.
+        return self.can_reply(answered_utterance) and self.quiet_frames >= 40
 
     def can_interrupt(self, response_utterance):
         return self.active and self.utterance > response_utterance

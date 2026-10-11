@@ -1,5 +1,35 @@
 # Capability and verification status
 
+## 2026-10-11 safety coverage and response waiting
+
+Output-only text moderation does not establish safety of the user's spoken
+request or of nonverbal synthesized sounds. A confirmed sexual-vocal request
+elicited an accommodating response; its innocuous output text received a real
+Aliyun pass. In a controlled cloud comparison, the request alone and the
+request plus answer were blocked, while the answer alone passed. Input/audio
+review remains disabled. Stronger model refusal instructions are defense in
+depth, not proof that this coverage gap is closed.
+
+The dominant measured delay was whole-answer generation: 5–18 seconds in the
+reported call, compared with 0.3–0.5 seconds for Aliyun review. The update asks
+for a concise answer, admits an unanswered speech turn after 1.28 seconds of
+confirmed silence, samples detailed projection telemetry once per 25 windows,
+and overlaps complete-text moderation with the final codec work. Release still
+requires a real cloud pass and both complete output channels. It preserves
+generation and playback interruption. The browser no longer infers incomplete
+speech from character count, or calls post-delivery buffering total latency.
+
+Same-input two-turn replay measured generation-to-release at 8.20/11.20 seconds
+before and 7.08/5.16 seconds after. Answers differ in length; this is not a
+matched-output inference-speed benchmark. Speaking-window mean compute in
+these short calls was 418/441 ms per 400 ms input, so faster-than-realtime
+inference is still unproven. Normal follow-up, generation cancellation, and a
+60-second browser playback/interruption replay passed without recorded errors
+or rebuffering. All released replies had actual Aliyun pass receipts. A
+controlled risky-output fixture was blocked with zero content release.
+Subjective sound quality, live-human acceptance and comprehensive safety
+coverage remain unverified.
+
 ## 2026-10-11 speech-confirmed interruption correction
 
 The four-node candidate uses a pinned, local CPU Silero detector to confirm

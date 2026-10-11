@@ -193,7 +193,7 @@ function scheduleReply(reply){
   reply.initialLead=reply.finished?.04:initialReserve(reply);
   diagnostic('initial_buffer',{event_id:reply.id,lead_seconds:reply.initialLead,producer_ratio:producerRatio});
   lastBufferWait=(performance.now()-reply.firstAt)/1000+(reply.finished?.04:reply.initialLead);
-  event('开始播放回答 · 模型开口至播放 '+lastBufferWait.toFixed(1)+' 秒');reply.started=true;
+  event('开始播放回答 · 收到声音后的缓冲 '+lastBufferWait.toFixed(1)+' 秒');reply.started=true;
  }
  // First block is smaller; later blocks amortize decoding overhead.
  // A completed reply needs no reserve for an ungenerated next block.
@@ -211,12 +211,8 @@ function finishAudio(e){
   const sorted=reply.ratios.slice().sort((a,b)=>a-b);
   producerRatio=sorted[Math.min(sorted.length-1,Math.floor(sorted.length*.9))];
  }
- const text=utterances.get(e.event_id)?.textContent||'',duration=reply.totalLength/reply.rate;
- if(text.length>=8&&duration<Math.max(.6,text.length*.06)){
-  $('response-warning').hidden=false;
-  $('response-warning').textContent='模型这轮声音不完整（'+duration.toFixed(2)+'秒）。连接仍在收音，可以继续说话。';
-  event('回答声音不完整 · '+duration.toFixed(2)+' 秒');
- }
+ // Character count cannot certify text/audio alignment (English words and
+ // nonverbal speech differ). Only explicit server failures are errors.
  updateAudioStatus();
 }
 function updateAudioStatus(){

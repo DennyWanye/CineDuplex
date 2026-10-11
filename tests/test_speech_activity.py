@@ -24,6 +24,8 @@ class SpeechEvidenceTests(unittest.TestCase):
         self.frames(e, .05, 9)
         self.assertFalse(e.can_reply(0))
         e.observe(.05)
+        self.assertFalse(e.can_reply(0))
+        self.frames(e, .05, 10)
         self.assertTrue(e.can_reply(0))
         self.assertFalse(e.can_reply(1))
 
@@ -43,6 +45,19 @@ class SpeechEvidenceTests(unittest.TestCase):
         self.frames(e, .9, 10)
         self.assertEqual(e.utterance, 1)
         self.assertFalse(e.can_interrupt(1))
+
+    def test_reply_deadline_requires_unanswered_speech_and_resets_on_new_speech(self):
+        e = SpeechEvidence()
+        self.frames(e, .01, 100)
+        self.assertFalse(e.reply_overdue(0))
+        self.frames(e, .9, 20)
+        self.frames(e, .01, 39)
+        self.assertFalse(e.reply_overdue(0))
+        e.observe(.01)
+        self.assertTrue(e.reply_overdue(0))
+        self.assertFalse(e.reply_overdue(1))
+        self.frames(e, .9, 3)
+        self.assertFalse(e.reply_overdue(0))
 
 
 if __name__ == '__main__':

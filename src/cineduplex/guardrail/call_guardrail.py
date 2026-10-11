@@ -138,7 +138,8 @@ class CallGuardrail:
                 self.call._emit({'type': 'guardrail_pending', 'event_id': event_id,
                                  'phase': 'generating',
                                  'message': '正在生成回答，完成并通过安全审核后播放。'})
-            if pending.queued:
+            if ((pending.queued and kind not in ('audio_start', 'audio', 'audio_end', 'response_warning'))
+                    or (pending.audio_done and kind in ('audio_start', 'audio', 'audio_end', 'response_warning'))):
                 self._deny('output', 'content_after_response_end', key); return True
             value = dict(event)
             size = len(str(value).encode())
@@ -165,16 +166,17 @@ class CallGuardrail:
                 pending.text_done = True
             if kind in ('audio_end', 'response_warning'):
                 pending.audio_done = True
+                self.condition.notify_all()
             if (len(pending.text) > 2000 or len(pending.pcm) > 48000 * self.config.max_answer_seconds
                     or self.pending_bytes > self.MAX_PENDING_BYTES or self.event_count > self.MAX_EVENTS):
                 self._deny('output', 'response_budget_exceeded', key); return True
-            if pending.text_done and pending.audio_done:
+            if pending.text_done and not pending.queued:
                 pending.input_barrier = self._queue_input() if self.config.input_audio else 0
                 pending.queued = True
                 try:
                     self.call._emit({'type': 'guardrail_pending', 'event_id': event_id,
                                      'phase': 'reviewing',
-                                     'message': '回答已生成，正在进行阿里云安全审核。'})
+                                     'message': '整段回答文字已生成，正在进行阿里云安全审核。'})
                     self.output_queue.put_nowait(pending)
                 except queue.Full:
                     self._deny('output', 'review_backlog', key)
@@ -238,6 +240,23 @@ class CallGuardrail:
                     self._record('output_text', decision, event_id=pending.event_id)
                     if not decision.allowed:
                         self._deny('output_text', 'risk_detected', pending.event_id); return
+                # Review the complete text while the codec finishes its tail.
+                # No text or PCM is released until BOTH channels are complete.
+                deadline = time.monotonic() + self.config.max_answer_seconds
+                with self.condition:
+                    while not pending.audio_done:
+                        if (self.closed.is_set() or self.call.closed.is_set()
+                                or self.responses.get(pending.event_id) is not pending
+                                or pending.epoch != self.call.epoch):
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise GuardrailError('audio_completion_timeout')
+                        self.condition.wait(min(.2, remaining))
+                    if (self.closed.is_set() or self.call.closed.is_set()
+                            or self.responses.get(pending.event_id) is not pending
+                            or pending.epoch != self.call.epoch):
+                        continue
                 if self.config.output_audio and pending.pcm:
                     decision = self.client.check_audio(bytes(pending.pcm), sample_rate=24000,
                             data_id=self.call.id + '-out-' + hashlib.sha256(pending.event_id.encode()).hexdigest()[:16], cancelled=self.closed)

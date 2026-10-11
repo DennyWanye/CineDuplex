@@ -163,6 +163,33 @@ class ClientTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    def test_complete_text_review_overlaps_codec_but_release_waits_for_tail(self):
+        gate = self.make_gate()
+        for e in ({'type':'event_start'}, {'type':'text_delta','text':'你好。'},
+                  {'type':'event_end','text':'你好。'}):
+            gate.intercept({**e,'event_id':'overlap'})
+        wait_for(lambda: bool(self.client.text_requests))
+        wait_for(lambda: any(e['type']=='guardrail_result' for e in self.call.events))
+        self.assertFalse(any(e['type'] in gate.CONTENT for e in self.call.events))
+        for e in ({'type':'audio_start','epoch':0},
+                  {'type':'audio','epoch':0,'sample_rate':24000,'pcm':'AAA='},
+                  {'type':'audio_end','epoch':0}):
+            gate.intercept({**e,'event_id':'overlap'})
+        wait_for(lambda: any(e['type']=='audio_end' for e in self.call.events))
+        self.assertEqual(len(self.client.text_requests), 1)
+
+    def test_interruption_after_text_pass_before_audio_tail_releases_nothing(self):
+        gate = self.make_gate()
+        for e in ({'type':'event_start'}, {'type':'event_end','text':'你好。'}):
+            gate.intercept({**e,'event_id':'old'})
+        wait_for(lambda: any(e['type']=='guardrail_result' for e in self.call.events))
+        self.call.epoch = 1
+        gate.intercept({'type':'stop_audio','epoch':1})
+        gate.intercept({'type':'audio_end','event_id':'old','epoch':0})
+        self.assertFalse(any(e['type'] in gate.CONTENT for e in self.call.events))
+        self.assertNotIn('old', gate.responses)
+        self.assertFalse(self.call.closed.is_set())
+
     def make_gate(self, client=None):
         self.client = client or FakeClient(); self.call = FakeCall()
         self.gate = CallGuardrail(self.call, self.client)

@@ -108,6 +108,7 @@ class Config:
         return {'enabled': self.enabled, 'provider': 'aliyun' if self.enabled else None,
                 'region': self.region if self.enabled else None,
                 'output_text': self.enabled,
+                'output_text_service': self.output_service if self.enabled else None,
                 'input_audio': self.enabled and self.input_audio,
                 'output_audio': self.enabled and self.output_audio,
                 'mode': 'review-before-release' if self.enabled else 'disabled',
@@ -122,10 +123,12 @@ class Decision:
     request_id: str = ''
     labels: tuple = ()
     elapsed_ms: float = 0.0
+    dimensions: tuple = ()
 
     def record(self):
         return {'allowed': self.allowed, 'suggestion': self.suggestion,
                 'request_id': self.request_id, 'labels': list(self.labels),
+                'dimensions': list(self.dimensions),
                 'elapsed_ms': round(self.elapsed_ms, 1)}
 
 
@@ -150,7 +153,7 @@ def parse_decision(payload, elapsed_ms=0):
     data = payload.get('Data')
     if not isinstance(data, dict) or data.get('Suggestion') not in ('pass', 'block', 'watch', 'mask'):
         raise GuardrailError('cloud_response_incomplete')
-    labels = set()
+    labels = set(); dimensions = set()
     allowed = data['Suggestion'] == 'pass'
     details = data.get('Detail', [])
     if not isinstance(details, list):
@@ -159,6 +162,9 @@ def parse_decision(payload, elapsed_ms=0):
         if not isinstance(item, dict) or item.get('Suggestion') not in ('pass', 'block', 'watch', 'mask'):
             raise GuardrailError('cloud_response_incomplete')
         allowed = allowed and item['Suggestion'] == 'pass'
+        dimension = item.get('Type')
+        if isinstance(dimension, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', dimension):
+            dimensions.add(dimension)
         for result in item.get('Result', []):
             if not isinstance(result, dict):
                 raise GuardrailError('cloud_response_incomplete')
@@ -166,7 +172,7 @@ def parse_decision(payload, elapsed_ms=0):
             if isinstance(label, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', label):
                 labels.add(label)
     return Decision(allowed, data['Suggestion'], str(payload.get('RequestId', ''))[:128],
-                    tuple(sorted(labels)), elapsed_ms)
+                    tuple(sorted(labels)), elapsed_ms, tuple(sorted(dimensions)))
 
 
 class AliyunGuardrail:
