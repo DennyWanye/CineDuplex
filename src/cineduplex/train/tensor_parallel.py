@@ -25,8 +25,8 @@ import torch.distributed as dist
 
 LEADER=3
 TP_GROUP=None
-CALL_RUNTIME_NAME='call-runtime-v44.py'
-CALL_RUNTIME_SHA='241722280fba90e765257a304685f836b42d91ec1a5efc2b78515b08e4c5da29'
+CALL_RUNTIME_NAME='call-runtime-v45.py'
+CALL_RUNTIME_SHA='71d71ca75ab29e25b1eb8a941ae575b71943ae0814430a442902fd5e8767c67a'
 GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v2.json'
 GUARDRAIL_BUNDLE_SHA='236d1f603c47d16dd3bc525941575180a0a9e4b270c62972b4cf0b53d018b3e9'
 
@@ -340,14 +340,25 @@ class Coordinator:
         install_call_runtime(self.root)
         # Update the native state-machine adapter on all admitted ranks,
         # including existing framework objects, without reloading weights.
-        policy_path=self.root/'native-turn-policy-v7.py'
+        policy_path=self.root/'native-turn-policy-v9.py'
         policy_source=policy_path.read_bytes()
-        policy_sha='d0232502c2cdbb23339f723b811803c4d1f7e12dcf1bec7411363b3d0a5e5fd9'
+        policy_sha='e9022d8581b5a6a37ac1ba3e11cb366856f8651db055d796bac7bba4cc78cbcc'
         if hashlib.sha256(policy_source).hexdigest()!=policy_sha:
             raise ValueError('native turn policy source identity')
         policy=types.ModuleType('cineduplex_native_turn_policy')
         exec(compile(policy_source,str(policy_path),'exec'),policy.__dict__)
-        policy.install(native_prefix=False)
+        import sys
+        activity_source=(self.root/'speech-activity-v1.py').read_bytes()
+        activity_sha='583080a1cf98af8a6d4f7c790599fa6f0b69da4b02e706513df21a369dadc77e'
+        if hashlib.sha256(activity_source).hexdigest()!=activity_sha:
+            raise ValueError('speech activity source identity')
+        activity=types.ModuleType('cineduplex.train.speech_activity')
+        exec(compile(activity_source,str(self.root/'speech-activity-v1.py'),'exec'),activity.__dict__)
+        sys.modules[activity.__name__]=activity
+        if getattr(model,'_cineduplex_vad_sha',None)!=activity.MODEL_SHA256:
+            model._cineduplex_vad_detector=activity.load_detector(self.root/'silero-vad-v1.onnx')
+            model._cineduplex_vad_sha=activity.MODEL_SHA256
+        policy.install(native_prefix=False,speech_detector=model._cineduplex_vad_detector)
         sampling_sha='6926cdf5f2804de298dce215f0f30bb57db081b3122d9f2397a4433f89734178'
         if getattr(model,'_cineduplex_sampling_sha',None)!=sampling_sha:
             path=self.root/'independent-sampling-v2.py';source=path.read_bytes()
@@ -622,7 +633,8 @@ class Coordinator:
                 'precision':'bf16','quantization':'none','world_size':self.world,'leader_rank':LEADER,
                 'sampling_error_broadcast_and_recovery':'passed',
                 'deferred_pair_sentinel_and_recovery':'passed',
-                'native_turn_policy_sha256':policy_sha,
+                'native_turn_policy_sha256':policy_sha,'speech_activity_sha256':activity_sha,
+                'speech_detector_sha256':activity.MODEL_SHA256,'interrupt_policy':'speech-confirmed-barge-in',
                 'speech_sampling':model._cineduplex_sampling_identity,
                 'speech_sampling_sha256':sampling_sha,'generation_stream_sha256':stream_sha,
                 'generation_loop':model._cineduplex_generation_loop,'stage_meter_sha256':stage_sha,

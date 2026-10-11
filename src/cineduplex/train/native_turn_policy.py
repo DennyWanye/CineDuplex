@@ -56,13 +56,19 @@ class TurnBoundary:
                                   'decision': 'cancel_unfinished' if interrupt else 'preserve_completed'}}
 
 
-def install(native_prefix=False):
+def install(native_prefix=False, speech_detector=None):
     from lychee_fd.runtime.hf_v9_realtime import HFRealtimeV9GenerationFramework
     cls = HFRealtimeV9GenerationFramework
     original = getattr(cls, '_cineduplex_native_create', cls.create_incremental_stream_session)
     cls._cineduplex_native_create = original
 
     def create(fw, *args, **kwargs):
+        activity = None
+        if speech_detector is not None:
+            from cineduplex.train.speech_activity import StreamingSpeech
+            activity = StreamingSpeech(speech_detector)
+        answered_utterance = 0
+        response_utterance = 0
         # A multiplicative logit factor is not a calibrated probability
         # threshold. With positive SS logits it can reverse native KL/SS
         # ordering before the user finishes their question. Preserve the
@@ -80,6 +86,20 @@ def install(native_prefix=False):
         restore_control = getattr(fw.model, '_cineduplex_restore_native_control', None)
         if restore_control is not None:
             restore_control()
+        # A native SS may fire in the middle of the user's question. Keep
+        # feeding the original audio/KV history, but defer SS/BC until a
+        # confirmed speech segment has ended. Do not answer silence twice.
+        listening_cls = __import__('lychee_fd.runtime.hf_v9_realtime',fromlist=['ListeningControlLogitsProcessor']).ListeningControlLogitsProcessor if activity else None
+        if listening_cls is not None:
+            listening_score = listening_cls.__call__
+            def wait_for_turn(processor, ids, scores):
+                result = listening_score(processor, ids, scores)
+                if not activity.evidence.can_reply(answered_utterance):
+                    result[:, processor.ss_token_id] = -float('inf')
+                    if processor.bc_token_id is not None:
+                        result[:, processor.bc_token_id] = -float('inf')
+                return result
+            listening_cls.__call__ = wait_for_turn
         # Preserve strong native interruptions. A marginal SL decision must
         # persist for a second control window; a single near-tie in silence
         # must not erase an otherwise valid response before its first sound.
@@ -87,6 +107,32 @@ def install(native_prefix=False):
         native_score = getattr(speaking_cls, '_cineduplex_native_score', speaking_cls.__call__)
         speaking_cls._cineduplex_native_score = native_score
         def confirmed_sl(processor, ids, scores):
+            if activity is not None:
+                # Apply the decision before the native state machine truncates
+                # its token streams. Changing only the final interrupt flag
+                # would release an incomplete answer or lose its audio tail.
+                pos = ids.shape[1] % processor.control_token_chunk_size
+                sl, ks = processor.sl_token_id, processor.ks_token_id
+                allowed = ([sl, ks] if pos == processor.control_token_chunk_size - 1
+                           else [fw.detect_token_id] if pos == processor.control_token_chunk_size - 2
+                           else [fw.sleep_token_id])
+                values = scores[:, allowed].clone()
+                scores.fill_(-float('inf')); scores[:, allowed] = values
+                if len(allowed) == 2:
+                    processor.last_probs = dict(zip(('sl', 'ks'), values[0].float().softmax(0).tolist()))
+                    interrupted = activity.evidence.can_interrupt(response_utterance)
+                    # A confirmed new user utterance can stop a real response;
+                    # otherwise let its acoustic EOS finish it normally.
+                    scores[:, ks if interrupted else sl] = -float('inf')
+                    fw.model._realtime_interrupt_audit = {
+                        'native_sl_probability': processor.last_probs['sl'],
+                        'speech_probability': activity.evidence.probability,
+                        'speech_active': activity.evidence.active,
+                        'utterance': activity.evidence.utterance,
+                        'response_utterance': response_utterance,
+                        'confirmed_new_speech': interrupted,
+                        'policy': 'speech-confirmed-barge-in'}
+                return scores
             result = native_score(processor, ids, scores)
             sl,ks = processor.sl_token_id,processor.ks_token_id
             if (ids.shape[1]%processor.control_token_chunk_size==processor.control_token_chunk_size-1
@@ -110,10 +156,22 @@ def install(native_prefix=False):
         boundary = TurnBoundary(fw.tts_end_id, fw.eos_token_id)
 
         def stream(current, *args, **kwargs):
+            nonlocal answered_utterance, response_utterance
             audio = args[0] if args else kwargs.get('audio')
             if audio is not None:
                 boundary.input_window(audio)
+                if activity is not None:
+                    started = activity.feed(audio)
+                    yield {'type': 'input_speech', 'started': started,
+                           'active': activity.evidence.active,
+                           'utterance': activity.evidence.utterance,
+                           'speech_probability': round(activity.evidence.probability, 4),
+                           'interrupt_playback': bool(started and answered_utterance
+                                                      and current.listening_state == 'l')}
             for event in advance(*args, **kwargs):
+                if (activity is not None and event.get('type') == 'state_change'
+                        and event.get('from') == 'L' and event.get('to') in ('S', 'B')):
+                    answered_utterance = response_utterance = activity.evidence.utterance
                 if event.get('type') == 'state_change' and event.get('reason') == 'control_sl':
                     speech_tail = int(current.generated_stoken_ids[0, -1].item())
                     event = boundary.observe(event, speech_tail)
@@ -129,6 +187,9 @@ def install(native_prefix=False):
                 else:
                     event = boundary.observe(event)
                 yield event
+            audit = getattr(fw.model, '_realtime_interrupt_audit', None)
+            if activity is not None and audit is not None:
+                yield {'type': 'interrupt_control', **audit}
 
         session.advance_stream = types.MethodType(stream, session)
         return session

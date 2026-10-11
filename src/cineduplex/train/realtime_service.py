@@ -641,7 +641,7 @@ class CallArchive:
 
 class Call:
     def __init__(self, app, variant, voice='female', probe=False, language='auto'):
-        app.identity.update(codec_mode='native-stream-32-40',codec_chunk_tokens=40,codec_first_chunk_tokens=32,command_transport='fixed-byte-gloo',interrupt_policy='native-strong-immediate-weak-two-windows',tp_branch_layout='all-decoder-branches-sharded')
+        app.identity.update(codec_mode='native-stream-32-40',codec_chunk_tokens=40,codec_first_chunk_tokens=32,command_transport='fixed-byte-gloo',interrupt_policy='speech-confirmed-barge-in' if getattr(app,'tensor_parallel',None) is not None else 'native-control',tp_branch_layout='all-decoder-branches-sharded')
         app.model._realtime_interrupt_audit=None
         self.last_interrupt_audit=None
         self.app=app; self.id=str(uuid.uuid4()); self.variant=variant;self.voice=voice;self.probe=probe;self.language=language
@@ -808,6 +808,19 @@ class Call:
                         # rank even if the browser hangs up mid-window.
                         if self.closed.is_set():
                             if tp is None:break
+                            continue
+                        if raw['type']=='input_speech':
+                            self.emit({**raw,'input_seq':self.processed//6400})
+                            # With whole-answer review, generation may already
+                            # be idle while its approved audio is still playing.
+                            # A new utterance must also stop that playback.
+                            if raw.get('interrupt_playback'):
+                                self.epoch+=1
+                                self.emit({'type':'stop_audio','epoch':self.epoch,
+                                           'reason':'confirmed_user_speech'})
+                            continue
+                        if raw['type']=='interrupt_control':
+                            self.emit({**raw,'input_seq':self.processed//6400})
                             continue
                         if raw['type']=='speaking_done':
                             self.emit({'type':'generation_end','reason':raw.get('reason'),

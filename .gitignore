@@ -19,6 +19,7 @@ vendor/lychee-fd-network-incomplete/
 !/configs/data_sources.json
 !/configs/source_lock.json
 !/configs/vendor-source-manifest.json
+!/configs/speech_activity.json
 /docs/*
 !/docs/DATA_PIPELINE.zh-CN.md
 !/docs/AGENT_HANDOFF.zh-CN.md

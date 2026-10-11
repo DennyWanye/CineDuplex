@@ -1,0 +1,16 @@
+{
+  "provider": "Silero VAD",
+  "revision": "1e261b036686cd0017d500ee96acd1c4ba572a9d",
+  "model_url": "https://raw.githubusercontent.com/snakers4/silero-vad/1e261b036686cd0017d500ee96acd1c4ba572a9d/src/silero_vad/data/silero_vad.onnx",
+  "model_sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+  "model_bytes": 2327524,
+  "runtime_filename": "silero-vad-v1.onnx",
+  "license_url": "https://raw.githubusercontent.com/snakers4/silero-vad/1e261b036686cd0017d500ee96acd1c4ba572a9d/LICENSE",
+  "license_sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b",
+  "execution_provider": "CPUExecutionProvider",
+  "sample_rate": 16000,
+  "frame_samples": 512,
+  "audio_upload": false,
+  "input_audio_discard": false,
+  "whole_response_output_review_required": true
+}

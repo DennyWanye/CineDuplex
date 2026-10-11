@@ -1,5 +1,32 @@
 # Capability and verification status
 
+## 2026-10-11 speech-confirmed interruption correction
+
+The four-node candidate uses a pinned, local CPU Silero detector to confirm
+speech segments. It continues feeding every microphone sample to the native
+incremental model. SS/BC waits for the current question to finish; an unfinished
+answer's SL is admitted only on a confirmed new utterance. Acoustic EOS still
+finishes an answer normally. New speech also stops already approved playback
+when model generation has returned to listening. Whole-response Aliyun review
+and fail-closed release remain unchanged.
+
+Targeted normal/follow-up and generation-interruption calls produced actual
+Aliyun pass receipts. A browser replay of the first 32 seconds of the failed
+microphone call produced and played a 10.84-second response (7/7 packets).
+In a separate browser playback test, new speech stopped an already playing
+answer and the subsequent arithmetic answer completed playback after its own
+Aliyun pass. Neither test bypassed whole-answer review.
+This is a replay of real microphone input, not a fresh live-human acceptance
+test. The page's text-length duration heuristic warned on that English reply;
+the model emitted acoustic EOS and a final codec block, and browser playback
+completed. This does not certify subjective sound completeness or correctness
+of the response. Model topic-following and language consistency remain separate
+quality limitations.
+
+The deployment requires the separately stored ONNX asset and upstream license;
+see `configs/speech_activity.json`. No detector weights or recorded audio are
+published in the repository.
+
 ## 2026-10-11 turn-boundary and whole-response playback deployment
 
 The candidate remembers acoustic completion across native tail padding,
