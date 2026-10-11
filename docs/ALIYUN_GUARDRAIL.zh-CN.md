@@ -63,3 +63,26 @@ PYTHONPATH=src python3 -B scripts/check_guardrail.py --live
 - [原生签名调用示例](https://help.aliyun.com/zh/document_detail/2925843.html)
 - [语音审核服务、临时存储及结果查询](https://help.aliyun.com/zh/document_detail/3030647.html)
 - [语音 SDK 的临时上传令牌流程](https://help.aliyun.com/zh/document_detail/604972.html)
+
+
+## 区分阿里拦截、模型拒绝和本地停止
+
+每次审核的 `guardrail_result` 保留 `call_id`、输入窗口 `input_index` 或回答
+`event_id`、`provider`、`allowed`、`request_id`、风险标签及耗时。语音转写不进入这些日志。
+每个准备释放的回答或导致通话停止的决定，另记 `safety_outcome`：
+
+- `aliyun_block`：阿里返回非通过回执；记录原始请求编号、审核阶段和风险标签。
+- `application_stop`：本地一致性检查、审核失败或超时等导致停止；不能计入阿里内容拦截率。
+- `model_refusal_expression`：已启用审核均通过，模型回答中检测到明确拒绝表达。
+- `model_response`：已启用审核均通过，未检测到明确拒绝表达；不代表模型同意危险请求。
+
+模型没有结构化拒绝信号，后两项使用本地文字规则，记录
+`refusal_detection=text_heuristic_v1` 与 `safety_verdict=not_assessed`。
+引用拒绝话语、先拒绝后提供危险内容等仍可能命中，因此它是文字观察，不能作为安全认证。
+该判断不调用新的模型或云接口，不改变整段审核、输出释放或插话规则。
+`approved_for_release` 只代表服务端审核完成，实际播放须另核对浏览器 `audio_played`。
+同一通话可以先正常回答、后被拦截，应按回答及输入窗口查看，不能只取通话最后一个状态。
+
+日志在运行服务的 `calls/<call_id>/events.jsonl`，页面诊断下载保留这些事件。
+页面同时显示来源说明。新增来源事件只对部署后的通话生效，旧日志不回写；
+历史通话需结合已有云端回执和 `event_end` 回答人工判定。

@@ -37,6 +37,23 @@ def audio_text_consistent(expected, transcript):
     return bool(expected and transcript and SequenceMatcher(None, expected, transcript, autojunk=False).ratio() >= .6)
 
 
+def refusal_observation(text):
+    """Text evidence only; the native model has no structured refusal signal.
+
+    A match does not certify a safe answer, and no match does not prove assent.
+    Never include source content in this metadata or use it to bypass review.
+    """
+    patterns = (
+        ('zh_explicit', r'(?:不能|无法|不会|不可以|不允许)(?:为你|帮你|向你)?(?:帮助|协助|提供|教授|教你|满足|执行)'),
+        ('en_explicit', r"\b(?:i|we)\s+(?:cannot|can't|will not|won't)\s+(?:help|assist|provide|comply)\b"),
+    )
+    matches = [name for name, pattern in patterns if re.search(pattern, text, re.I)]
+    return {'response_origin': 'model', 'refusal_signal': 'expression_detected' if matches else 'unknown',
+            'refusal_detection': 'text_heuristic_v1', 'refusal_rule_ids': matches,
+            'safety_verdict': 'not_assessed',
+            'response_sha256': hashlib.sha256(text.encode()).hexdigest()}
+
+
 @dataclass
 class PendingResponse:
     event_id: str
@@ -85,27 +102,40 @@ class CallGuardrail:
         if self.config.output_audio:
             self.audio_worker.start()
 
-    def _record(self, direction, decision=None, error=None, event_id=None, provider='aliyun'):
+    def _record(self, direction, decision=None, error=None, event_id=None, provider='aliyun', input_index=None):
         row = {'type': 'guardrail_result', 'direction': direction, 'event_id': event_id,
-               'provider': provider, 'policy': 'pass-only',
+               'provider': provider, 'policy': 'pass-only', 'call_id': self.call.id,
+               'input_index': input_index,
                **(decision.record() if decision is not None else {'allowed': False, 'error': error})}
         self.audit.append(row)
         self.call._emit(row)
 
-    def _deny(self, direction, code, event_id=None, provider='application'):
+    def _deny(self, direction, code, event_id=None, provider='application', cause=None, input_index=None):
         with self.lock:
             if self.failed or self.closed.is_set() or self.call.closed.is_set():
                 return
             self.failed = True
-            self._record(direction, error=code, event_id=event_id, provider=provider)
+            self._record(direction, error=code, event_id=event_id, provider=provider, input_index=input_index)
+            source = 'aliyun' if cause is not None and not cause.allowed else 'application'
+            message = ('阿里云拦截了本次内容，通话已停止。' if source == 'aliyun'
+                       else '本地防护因审核异常或一致性检查停止通话，请查看日志。')
+            self.call._emit({'type': 'safety_outcome', 'schema': 1, 'call_id': self.call.id,
+                             'event_id': event_id, 'input_index': input_index,
+                             'outcome': 'aliyun_block' if source == 'aliyun' else 'application_stop',
+                             'decision_source': source, 'direction': direction, 'reason': code,
+                             'request_id': cause.request_id if cause is not None else None,
+                             'labels': list(cause.labels) if cause is not None else [],
+                             'evidence': 'provider_receipt' if source == 'aliyun' else 'local_policy',
+                             'message': message})
             for pending in self.responses.values(): pending.cancelled.set()
             self.responses.clear(); self.pending_bytes = 0; self.event_count = 0
             self.input_buffer.clear(); self.input_overlap = b''
             self.call.epoch += 1
             self.call._emit({'type': 'stop_audio', 'epoch': self.call.epoch, 'reason': 'guardrail'})
             self.call._emit({'type': 'guardrail_block', 'direction': direction,
-                             'message': ('这次通话的内容未通过安全审核，通话已停止。' if code == 'risk_detected'
-                                         else '安全审核暂时无法完成，通话已停止，请稍后重试。')})
+                             'decision_source': source, 'reason': code,
+                             'request_id': cause.request_id if cause is not None else None,
+                             'message': message})
             self.call.stop('guardrail_blocked' if code == 'risk_detected' else 'guardrail_unavailable')
             self.closed.set(); self.condition.notify_all()
 
@@ -263,9 +293,9 @@ class CallGuardrail:
                 with self.lock:
                     if self.closed.is_set() or self.call.closed.is_set():
                         return
-                    self._record('input_audio', decision)
+                    self._record('input_audio', decision, input_index=index)
                     if not decision.allowed:
-                        self._deny('input_audio', 'risk_detected'); return
+                        self._deny('input_audio', 'risk_detected', cause=decision, input_index=index); return
                 if decision.transcript.strip():
                     # Preserve recent request context across audio windows; do
                     # not publish ASR text in browser events or safety logs.
@@ -276,9 +306,9 @@ class CallGuardrail:
                             session_id=self.call.id, chat_id='in-' + str(index))
                     with self.lock:
                         if self.closed.is_set() or self.call.closed.is_set(): return
-                        self._record('input_semantic', semantic)
+                        self._record('input_semantic', semantic, input_index=index)
                         if not semantic.allowed:
-                            self._deny('input_semantic', 'risk_detected'); return
+                            self._deny('input_semantic', 'risk_detected', cause=semantic, input_index=index); return
                     self.input_context = text[-1000:]
                 with self.lock:
                     self.input_reviewed = index; self.condition.notify_all()
@@ -304,7 +334,7 @@ class CallGuardrail:
                             or pending.cancelled.is_set() or pending.epoch != self.call.epoch): continue
                     self._record('output_audio', decision, event_id=pending.event_id)
                     if not decision.allowed:
-                        self._deny('output_audio', 'risk_detected', pending.event_id); return
+                        self._deny('output_audio', 'risk_detected', pending.event_id, cause=decision); return
                     # Untranscribable generated audio cannot be justified by
                     # a harmless text channel. Hold it even if vendor says none.
                     if not decision.transcript.strip():
@@ -337,7 +367,7 @@ class CallGuardrail:
                         continue
                     self._record('output_text', decision, event_id=pending.event_id)
                     if not decision.allowed:
-                        self._deny('output_text', 'risk_detected', pending.event_id); return
+                        self._deny('output_text', 'risk_detected', pending.event_id, cause=decision); return
                 # Review the complete text while the codec finishes its tail.
                 # No text or PCM is released until BOTH channels are complete.
                 deadline = time.monotonic() + self.config.max_answer_seconds
@@ -376,6 +406,15 @@ class CallGuardrail:
                                      'input_barrier': pending.input_barrier,
                                      'input_reviewed': self.input_reviewed,
                                      'message': '回答已通过已启用的安全审核。'})
+                    observation = refusal_observation(pending.text)
+                    refusal = observation['refusal_signal'] == 'expression_detected'
+                    self.call._emit({'type': 'safety_outcome', 'schema': 1, 'call_id': self.call.id,
+                                     'event_id': pending.event_id, 'decision_source': 'model',
+                                     'outcome': 'model_refusal_expression' if refusal else 'model_response',
+                                     'delivery': 'approved_for_release', 'input_barrier': pending.input_barrier,
+                                     'input_reviewed': self.input_reviewed, **observation,
+                                     'message': ('模型回答含拒绝表达（文字判断）；已启用审核均通过，阿里未拦截本轮。'
+                                                 if refusal else '模型生成回答；已启用审核均通过，未识别到明确拒绝表达。')})
                     for event in pending.events:
                         if self.closed.is_set() or self.call.closed.is_set() or pending.epoch != self.call.epoch:
                             break

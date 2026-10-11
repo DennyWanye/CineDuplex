@@ -237,6 +237,7 @@ async function poll(id){
     if(e.type==='response_warning'){$('response-warning').hidden=false;$('response-warning').textContent=e.message;event(e.message);}
     if(e.type==='session_warning'){$('response-warning').hidden=false;$('response-warning').textContent=e.message;event(e.message);}
     if(e.type==='guardrail_pending'){$('guardrail-status').textContent=e.message;}
+    if(e.type==='safety_outcome'){$('guardrail-status').textContent=e.message;event(e.message);}
     if(e.type==='guardrail_pass'){$('guardrail-status').textContent=e.message;}
     if(e.type==='guardrail_cancelled'){$('guardrail-status').textContent=e.message;event(e.message);}
     if(e.type==='guardrail_block'){clearPlayback();$('guardrail-status').textContent=e.message;error(e.message);event(e.message);}

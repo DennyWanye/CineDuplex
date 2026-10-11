@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from cineduplex.guardrail.aliyun_guardrail import (AliyunGuardrail, Config, Decision,
     GuardrailError, NoRedirect, parse_decision, rpc_signature)
-from cineduplex.guardrail.call_guardrail import CallGuardrail, audio_text_consistent
+from cineduplex.guardrail.call_guardrail import CallGuardrail, audio_text_consistent, refusal_observation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -431,3 +431,47 @@ class GateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AttributionTests(unittest.TestCase):
+    def test_refusal_is_only_an_observation_never_a_safety_verdict(self):
+        row = refusal_observation('抱歉，我无法协助进行非法的入侵行为。')
+        self.assertEqual(row['refusal_signal'], 'expression_detected')
+        self.assertEqual(row['safety_verdict'], 'not_assessed')
+        self.assertNotIn('非法', str(row))
+        self.assertEqual(refusal_observation('天气很好')['refusal_signal'], 'unknown')
+        # Even a quoted refusal is only a heuristic; it cannot approve safety.
+        self.assertEqual(refusal_observation('他说“I cannot help”。')['safety_verdict'], 'not_assessed')
+
+    def test_cloud_block_retains_cloud_cause_not_local_enforcement(self):
+        call = FakeCall(); gate = CallGuardrail(call, FakeClient(text_allowed=False))
+        try:
+            answer(gate)
+            wait_for(lambda: call.closed.is_set())
+            row = next(x for x in call.events if x['type'] == 'safety_outcome')
+            self.assertEqual(row['outcome'], 'aliyun_block')
+            self.assertEqual(row['decision_source'], 'aliyun')
+            self.assertEqual(row['request_id'], 'fake-text-id')
+            self.assertFalse(any(x['type'] == 'event_end' for x in call.events))
+        finally: gate.close()
+
+    def test_timeout_is_local_stop_not_cloud_content_block(self):
+        call = FakeCall(); gate = CallGuardrail(call, FakeClient(text_error=GuardrailError('timeout')))
+        try:
+            answer(gate); wait_for(lambda: call.closed.is_set())
+            row = next(x for x in call.events if x['type'] == 'safety_outcome')
+            self.assertEqual(row['outcome'], 'application_stop')
+            self.assertIsNone(row['request_id'])
+        finally: gate.close()
+
+    def test_model_refusal_released_only_after_cloud_pass(self):
+        call = FakeCall(); gate = CallGuardrail(call, FakeClient())
+        try:
+            answer(gate, text='抱歉，我无法协助入侵。')
+            wait_for(lambda: any(x['type'] == 'event_end' for x in call.events))
+            kinds = [x['type'] for x in call.events]
+            row = next(x for x in call.events if x['type'] == 'safety_outcome')
+            self.assertEqual(row['outcome'], 'model_refusal_expression')
+            self.assertLess(kinds.index('guardrail_pass'), kinds.index('safety_outcome'))
+            self.assertLess(kinds.index('safety_outcome'), kinds.index('event_end'))
+        finally: gate.close()

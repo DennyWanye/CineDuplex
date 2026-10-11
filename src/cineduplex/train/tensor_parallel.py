@@ -27,8 +27,8 @@ LEADER=3
 TP_GROUP=None
 CALL_RUNTIME_NAME='call-runtime-v47.py'
 CALL_RUNTIME_SHA='51c778056be83e4cbdc228012c47eee571876a70976f17dd25735448638d3d71'
-GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v6.json'
-GUARDRAIL_BUNDLE_SHA='b4cc74de2ce711364815dde31616ddc06db7a2d570c9db7fcd6aeefd5a88f147'
+GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v7.json'
+GUARDRAIL_BUNDLE_SHA='bb68f51c770254933564197f8a17b84052bdd32a3624ea5d877509f4001d914b'
 
 def install_call_runtime(root):
     path=Path(root)/CALL_RUNTIME_NAME;source=path.read_bytes()
