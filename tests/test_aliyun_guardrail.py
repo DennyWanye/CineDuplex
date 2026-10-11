@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from cineduplex.guardrail.aliyun_guardrail import (AliyunGuardrail, Config, Decision,
     GuardrailError, NoRedirect, parse_decision, rpc_signature)
-from cineduplex.guardrail.call_guardrail import CallGuardrail
+from cineduplex.guardrail.call_guardrail import CallGuardrail, audio_text_consistent
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +47,7 @@ class FakeClient:
     def check_audio(self, pcm, **kwargs):
         self.audio_requests.append((pcm, kwargs)); self.audio_entered.set()
         self.audio_release.wait(2)
-        return Decision(self.audio_allowed, 'pass' if self.audio_allowed else 'block', 'fake-audio-id')
+        return Decision(self.audio_allowed, 'pass' if self.audio_allowed else 'block', 'fake-audio-id', transcript='春天天气温暖。')
 
 
 class FakeCall:
@@ -71,6 +71,42 @@ def answer(gate, text='春天天气温暖。', event_id='evt-1'):
 
 
 class ClientTests(unittest.TestCase):
+    def test_audio_pending_code_only_allowed_for_result_query(self):
+        client = AliyunGuardrail(Config(enabled=True, access_key_id='id', access_key_secret='key'),
+                                lambda *args: b'{"Code":280,"Data":{"RiskLevel":"none"}}')
+        self.assertEqual(client.rpc('VoiceModerationResult')['Code'], 280)
+        with self.assertRaises(GuardrailError): client.rpc('MultiModalGuard')
+
+    def test_audio_pending_is_not_a_pass_and_transcript_stays_private(self):
+        client = AliyunGuardrail(Config(enabled=True, access_key_id='id', access_key_secret='key'))
+        responses = iter([{'Code':200,'Data':{'TaskId':'task'}},
+            {'Code':280,'Data':{'RiskLevel':'none'}},
+            {'Code':200,'Data':{'RiskLevel':'none','SliceDetails':[
+                {'RiskLevel':'none','Text':'private spoken request','Result':[
+                    {'Label':'sexual_sounds','RiskLevel':'none'}]}]}}])
+        client.rpc = lambda *a, **k: next(responses)
+        client._upload_wav = lambda *a: {}
+        with patch('cineduplex.guardrail.aliyun_guardrail.time.sleep', return_value=None):
+            result = client.check_audio(b'\x01\x00', sample_rate=16000, data_id='a')
+        self.assertFalse(result.allowed)
+        self.assertIn('sexual_sounds', result.labels)
+        self.assertEqual(result.transcript, 'private spoken request')
+        self.assertNotIn('private spoken request', str(result.record()) + repr(result))
+
+    def test_standard_acoustic_label_blocks_even_without_text(self):
+        client = AliyunGuardrail(Config(enabled=True, access_key_id='id', access_key_secret='key'))
+        responses = iter([{'Code':200,'Data':{'TaskId':'task'}}, {'Code':200,'Data':{
+            'RiskLevel':'none','SliceDetails':[{'RiskLevel':'none','Labels':'sexual_sounds','Text':''}]}}])
+        client.rpc = lambda *a, **k: next(responses)
+        client._upload_wav = lambda *a: {}
+        with patch('cineduplex.guardrail.aliyun_guardrail.time.sleep', return_value=None):
+            decision = client.check_audio(b'\x01\x00', sample_rate=16000, data_id='sound')
+        self.assertFalse(decision.allowed)
+        self.assertIn('sexual_sounds', decision.labels)
+        self.assertEqual(decision.transcript, '')
+        self.assertEqual(client.config.status()['nonverbal_detection'], 'disabled')
+        self.assertEqual(replace(client.config, output_audio=True).status()['nonverbal_detection'], 'configured-unvalidated')
+
     def test_disabled_needs_no_credentials(self):
         self.assertFalse(Config.from_env({}).enabled)
 
@@ -163,6 +199,76 @@ class ClientTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    def test_audio_text_consistency_handles_asr_errors_but_rejects_tone_hallucination(self):
+        self.assertTrue(audio_text_consistent('你好，我是一个能帮你处理各种任务的人工智能助手。', '你好我是个能帮你处理各种任务的人工智能助手'))
+        self.assertTrue(audio_text_consistent('2加2等于4。', '二加二等于四'))
+        self.assertFalse(audio_text_consistent('这是一段测试音。', '嗯的嗯的'))
+        self.assertFalse(audio_text_consistent('你好', '...'))
+
+    def test_unrelated_audio_transcript_does_not_pass_with_safe_text(self):
+        client = FakeClient(Config(enabled=True, output_audio=True))
+        client.check_audio = lambda *a, **k: Decision(True, 'pass', 'tone-asr', transcript='嗯的嗯的')
+        gate = self.make_gate(client); answer(gate)
+        wait_for(self.call.closed.is_set)
+        self.assertEqual(self.content(), [])
+        self.assertIn('output_audio_text_mismatch', str(self.call.events))
+
+    def test_input_semantics_blocks_harmless_audio_verdict(self):
+        cfg = Config(enabled=True, input_audio=True, timeout=.1, audio_deadline=1)
+        client = FakeClient(cfg)
+        original = client.check_text
+        client.check_text = lambda text, **kw: (Decision(False, 'block', 'semantic-risk')
+            if kw['direction'] == 'input' else original(text, **kw))
+        gate = self.make_gate(client)
+        gate.input_audio(0, b'\x01\x00' * 6400); answer(gate)
+        wait_for(self.call.closed.is_set)
+        self.assertEqual(self.content(), [])
+        self.assertTrue(any(e.get('direction') == 'input_semantic' and e.get('allowed') is False
+                            for e in self.call.events))
+
+    def test_nonzero_quiet_audio_is_not_discarded_but_digital_silence_is(self):
+        cfg = Config(enabled=True, input_audio=True, input_window_seconds=1)
+        gate = self.make_gate(FakeClient(cfg))
+        gate.input_audio(0, b'\0' * 32000)
+        self.assertEqual(gate.input_submitted, 0)
+        gate.input_audio(1, b'\x01\x00' * 16000)
+        wait_for(lambda: gate.input_reviewed == 1)
+        self.assertEqual(len(self.client.audio_requests), 1)
+
+    def test_untranscribable_output_is_never_released(self):
+        cfg = Config(enabled=True, output_audio=True, timeout=.1, audio_deadline=1)
+        client = FakeClient(cfg)
+        client.check_audio = lambda *a, **k: Decision(True, 'pass', 'empty-asr')
+        gate = self.make_gate(client); answer(gate)
+        wait_for(self.call.closed.is_set)
+        self.assertEqual(self.content(), [])
+        self.assertIn('output_audio_semantics_unrecognized', str(self.call.events))
+
+    def test_output_audio_review_runs_while_text_waits(self):
+        cfg = Config(enabled=True, output_audio=True, timeout=.1, audio_deadline=1)
+        client = FakeClient(cfg); client.text_release.clear()
+        gate = self.make_gate(client); answer(gate)
+        self.assertTrue(client.audio_entered.wait(1))
+        self.assertEqual(self.content(), [])
+        client.text_release.set()
+        wait_for(lambda: any(e['type'] == 'audio_end' for e in self.call.events))
+
+    def test_audio_cancellation_does_not_wait_for_old_cloud_task(self):
+        cfg = Config(enabled=True, output_audio=True, timeout=.1, audio_deadline=1)
+        client = FakeClient(cfg); entered = threading.Event()
+        def audio(pcm, **kwargs):
+            entered.set()
+            kwargs['cancelled'].wait(1)
+            raise GuardrailError('audio_review_cancelled')
+        client.check_audio = audio
+        gate = self.make_gate(client); answer(gate)
+        self.assertTrue(entered.wait(1))
+        old = gate.responses['evt-1']
+        self.call.epoch = 1; gate.intercept({'type':'stop_audio','epoch':1})
+        self.assertTrue(old.cancelled.is_set())
+        self.assertEqual(self.content(), [])
+        self.assertFalse(self.call.closed.is_set())
+
     def test_complete_text_review_overlaps_codec_but_release_waits_for_tail(self):
         gate = self.make_gate()
         for e in ({'type':'event_start'}, {'type':'text_delta','text':'你好。'},

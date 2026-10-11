@@ -25,10 +25,10 @@ import torch.distributed as dist
 
 LEADER=3
 TP_GROUP=None
-CALL_RUNTIME_NAME='call-runtime-v46.py'
-CALL_RUNTIME_SHA='c5adba16b4ff9583a20b6b594c918ad94b92fc69daba927c3a5538caad5a282c'
-GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v3.json'
-GUARDRAIL_BUNDLE_SHA='8cea33dde2f6ae4e577c259d7f50312bf71ca690ca04d3f45c4c1f60fee9e544'
+CALL_RUNTIME_NAME='call-runtime-v47.py'
+CALL_RUNTIME_SHA='51c778056be83e4cbdc228012c47eee571876a70976f17dd25735448638d3d71'
+GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v6.json'
+GUARDRAIL_BUNDLE_SHA='b4cc74de2ce711364815dde31616ddc06db7a2d570c9db7fcd6aeefd5a88f147'
 
 def install_call_runtime(root):
     path=Path(root)/CALL_RUNTIME_NAME;source=path.read_bytes()
@@ -43,6 +43,8 @@ def install_call_runtime(root):
     exec(compile(ast.Module(body=[instruction],type_ignores=[]),str(path),'exec'),namespace)
     runtime.conversation_instruction.__code__=namespace['conversation_instruction'].__code__
     if dist.get_rank()!=LEADER:return
+    if (getattr(runtime,'_call_runtime_sha',None)==CALL_RUNTIME_SHA
+            and getattr(runtime,'_guardrail_bundle_sha',None)==GUARDRAIL_BUNDLE_SHA):return
     import sys
     bundle_path=Path(root)/GUARDRAIL_BUNDLE_NAME;raw=bundle_path.read_bytes()
     if hashlib.sha256(raw).hexdigest()!=GUARDRAIL_BUNDLE_SHA:raise ValueError('guardrail bundle identity')
@@ -53,11 +55,11 @@ def install_call_runtime(root):
         module=types.ModuleType(name);module.__package__='cineduplex.guardrail';sys.modules[name]=module
         exec(compile(record['source'],'guardrail-memory://'+name,'exec'),module.__dict__)
     import cineduplex.train.realtime_service as runtime
-    if getattr(runtime,'_call_runtime_sha',None)==CALL_RUNTIME_SHA:return
     module=types.ModuleType('cineduplex.train.call_runtime_update');module.__package__='cineduplex.train'
     exec(compile(source,str(path),'exec'),module.__dict__)
     module.StageMeter=runtime.StageMeter
     runtime.Call=module.Call;runtime._call_runtime_sha=CALL_RUNTIME_SHA
+    runtime._guardrail_bundle_sha=GUARDRAIL_BUNDLE_SHA
     previous=runtime.Application.start
     def guarded_start(app,*args,**kwargs):
         if getattr(runtime,'_call_runtime_sha',None)==CALL_RUNTIME_SHA:
@@ -296,6 +298,23 @@ class Coordinator:
         return states
 
     def update(self,spec):
+        if 'guardrail_policy' in spec:
+            if self.rank!=LEADER:raise RuntimeError('guardrail leader required')
+            name=spec.get('name','')
+            if not (name.startswith('tp-runtime-v') and name.endswith('.py') and name[12:-3].isdigit()):
+                raise RuntimeError('guardrail runtime identity')
+            if hashlib.sha256((self.root/name).read_bytes()).hexdigest()!=spec.get('sha256'):
+                raise RuntimeError('guardrail source identity')
+            policy=spec['guardrail_policy']
+            if (not isinstance(policy,dict) or set(policy)!={'input_audio','output_audio'}
+                    or any(type(v) is not bool for v in policy.values())):
+                raise RuntimeError('invalid guardrail policy schema')
+            client=getattr(self,'guardrail_client',None)
+            if client is None or not client.config.enabled:raise RuntimeError('guardrail credentials unavailable')
+            from cineduplex.guardrail.aliyun_guardrail import Config,AliyunGuardrail
+            self.guardrail_client=AliyunGuardrail(Config(**{**vars(client.config),
+                'input_window_seconds':10.,'audio_service':'audio_media_detection',**policy}))
+            return [{'rank':self.rank,'guardrail_configured':True,**self.guardrail_client.config.status()}]
         if 'guardrail_credentials' in spec:
             if self.rank!=LEADER:raise RuntimeError('guardrail leader required')
             name=spec.get('name','')

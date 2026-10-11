@@ -706,7 +706,9 @@ class Call:
             if self.input.full():self.stop('input_backlog');raise ValueError('模型处理积压，请结束后重试')
             self.archive.write('input',pcm)
             if self.guardrail is not None:self.guardrail.input_audio(seq,pcm)
-            if self.closed.is_set():raise ValueError('安全审核不可用，通话已结束')
+            if self.closed.is_set():
+                raise ValueError('内容未通过安全审核，通话已结束' if self.end_reason=='guardrail_blocked'
+                                 else '安全审核未完成，通话已结束')
             self.input.put((time.time(),pcm));self.last_seq=seq;self.last_input=time.time();self.received+=len(pcm)//2
             return {'accepted':True,'received_seconds':self.received/16000,
                     'pending_seconds':(self.received-self.processed)/16000}

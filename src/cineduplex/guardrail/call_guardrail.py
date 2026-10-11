@@ -8,14 +8,33 @@ submits in-memory WAVs to Aliyun's temporary upload storage.
 from __future__ import annotations
 
 import base64
+from array import array
 from collections import deque
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 import queue
 import hashlib
+import re
 import threading
 import time
+import unicodedata
 
 from .aliyun_guardrail import GuardrailError
+
+
+def audio_text_consistent(expected, transcript):
+    """Bounded mismatch heuristic, not a sexual-sound classifier/confidence.
+
+    ASR can hallucinate words on tones or noise. A nonempty string alone must
+    not make unrelated audio safe. Normalize punctuation, case and digits;
+    keep both texts private and reject a substantial spoken/text mismatch.
+    """
+    def normalized(text):
+        text = unicodedata.normalize('NFKC', text).casefold()
+        text = text.translate(str.maketrans('0123456789', '零一二三四五六七八九'))
+        return re.sub(r'[\W_]+', '', text)
+    expected = normalized(expected); transcript = normalized(transcript)
+    return bool(expected and transcript and SequenceMatcher(None, expected, transcript, autojunk=False).ratio() >= .6)
 
 
 @dataclass
@@ -31,6 +50,10 @@ class PendingResponse:
     queued: bool = False
     input_barrier: int = 0
     size: int = 0
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    audio_review_done: bool = False
+    audio_review_started: bool = False
+    audio_transcript: str = field(default='', repr=False)
 
 
 class CallGuardrail:
@@ -47,42 +70,55 @@ class CallGuardrail:
         self.input_buffer = bytearray(); self.input_overlap = b''
         self.input_submitted = 0; self.input_reviewed = 0
         self.input_last_seq = -1
+        self.input_context = ''
+        self.input_quiet_samples = 0
+        self.input_had_activity = False
+        self.audio_queue = queue.Queue(maxsize=8)
         self.audit = deque(maxlen=128)
         self.closed = threading.Event(); self.failed = False
         self.output_worker = threading.Thread(target=self._output_loop, name='guardrail-output', daemon=True)
         self.input_worker = threading.Thread(target=self._input_loop, name='guardrail-input', daemon=True)
+        self.audio_worker = threading.Thread(target=self._audio_loop, name='guardrail-audio', daemon=True)
         self.output_worker.start()
         if self.config.input_audio:
             self.input_worker.start()
+        if self.config.output_audio:
+            self.audio_worker.start()
 
-    def _record(self, direction, decision=None, error=None, event_id=None):
+    def _record(self, direction, decision=None, error=None, event_id=None, provider='aliyun'):
         row = {'type': 'guardrail_result', 'direction': direction, 'event_id': event_id,
-               'provider': 'aliyun', 'policy': 'pass-only',
+               'provider': provider, 'policy': 'pass-only',
                **(decision.record() if decision is not None else {'allowed': False, 'error': error})}
         self.audit.append(row)
         self.call._emit(row)
 
-    def _deny(self, direction, code, event_id=None):
+    def _deny(self, direction, code, event_id=None, provider='application'):
         with self.lock:
             if self.failed or self.closed.is_set() or self.call.closed.is_set():
                 return
             self.failed = True
-            self._record(direction, error=code, event_id=event_id)
+            self._record(direction, error=code, event_id=event_id, provider=provider)
+            for pending in self.responses.values(): pending.cancelled.set()
             self.responses.clear(); self.pending_bytes = 0; self.event_count = 0
             self.input_buffer.clear(); self.input_overlap = b''
             self.call.epoch += 1
             self.call._emit({'type': 'stop_audio', 'epoch': self.call.epoch, 'reason': 'guardrail'})
             self.call._emit({'type': 'guardrail_block', 'direction': direction,
-                             'message': '这次通话的内容未通过安全审核，通话已停止。'})
+                             'message': ('这次通话的内容未通过安全审核，通话已停止。' if code == 'risk_detected'
+                                         else '安全审核暂时无法完成，通话已停止，请稍后重试。')})
             self.call.stop('guardrail_blocked' if code == 'risk_detected' else 'guardrail_unavailable')
             self.closed.set(); self.condition.notify_all()
 
     def _queue_input(self):
-        # Submit all newly received samples, with one second of overlap to
-        # reduce boundary loss. Fixed windows still have limited semantics.
+        # Only digital zero may be omitted. Quiet/non-speech audio is still
+        # reviewed: speech VAD is not a safety classifier.
         if not self.input_buffer:
             return self.input_submitted
         new = bytes(self.input_buffer)
+        self.input_buffer.clear()
+        self.input_had_activity = False; self.input_quiet_samples = 0
+        if not any(new):
+            return self.input_submitted
         self.input_submitted += 1
         try:
             self.input_queue.put_nowait((self.input_submitted, self.input_overlap + new))
@@ -90,7 +126,6 @@ class CallGuardrail:
             self._deny('input_audio', 'review_backlog')
             return self.input_submitted
         self.input_overlap = new[-32000:]
-        self.input_buffer.clear()
         return self.input_submitted
 
     def input_audio(self, seq, pcm):
@@ -104,7 +139,18 @@ class CallGuardrail:
                 return
             self.input_last_seq = seq
             self.input_buffer.extend(pcm)
-            if len(self.input_buffer) >= self.config.input_window_seconds * 32000:
+            # A quiet tail submits early while generation continues. Loudness
+            # affects batching only; it never discards unreviewed samples.
+            samples = array('h'); samples.frombytes(pcm)
+            for offset in range(0, len(samples), 320):
+                frame = samples[offset:offset + 320]
+                active = sum(x*x for x in frame) > len(frame) * 64**2
+                if active:
+                    self.input_had_activity = True; self.input_quiet_samples = 0
+                else:
+                    self.input_quiet_samples += len(frame)
+            if (len(self.input_buffer) >= self.config.input_window_seconds * 32000
+                    or self.input_had_activity and self.input_quiet_samples >= 6400):
                 self._queue_input()
 
     def intercept(self, event):
@@ -166,6 +212,13 @@ class CallGuardrail:
                 pending.text_done = True
             if kind in ('audio_end', 'response_warning'):
                 pending.audio_done = True
+                if self.config.output_audio and pending.pcm and not pending.audio_review_started:
+                    pending.audio_review_started = True
+                    try: self.audio_queue.put_nowait(pending)
+                    except queue.Full:
+                        self._deny('output_audio', 'review_backlog', key); return True
+                else:
+                    pending.audio_review_done = True
                 self.condition.notify_all()
             if (len(pending.text) > 2000 or len(pending.pcm) > 48000 * self.config.max_answer_seconds
                     or self.pending_bytes > self.MAX_PENDING_BYTES or self.event_count > self.MAX_EVENTS):
@@ -185,7 +238,9 @@ class CallGuardrail:
     def _remove(self, key):
         pending = self.responses.pop(key, None)
         if pending is not None:
+            pending.cancelled.set()
             self.pending_bytes -= pending.size; self.event_count -= len(pending.events)
+            self.condition.notify_all()
 
     def _cancel(self, key):
         pending = self.responses.get(key)
@@ -211,6 +266,21 @@ class CallGuardrail:
                     self._record('input_audio', decision)
                     if not decision.allowed:
                         self._deny('input_audio', 'risk_detected'); return
+                if decision.transcript.strip():
+                    # Preserve recent request context across audio windows; do
+                    # not publish ASR text in browser events or safety logs.
+                    text = self.input_context + '\n' + decision.transcript
+                    if len(text) > 2000:
+                        raise GuardrailError('input_semantic_context_exceeds_limit')
+                    semantic = self.client.check_text(text, direction='input',
+                            session_id=self.call.id, chat_id='in-' + str(index))
+                    with self.lock:
+                        if self.closed.is_set() or self.call.closed.is_set(): return
+                        self._record('input_semantic', semantic)
+                        if not semantic.allowed:
+                            self._deny('input_semantic', 'risk_detected'); return
+                    self.input_context = text[-1000:]
+                with self.lock:
                     self.input_reviewed = index; self.condition.notify_all()
             except Exception as exc:
                 self._deny('input_audio', self._error_code(exc)); return
@@ -219,6 +289,34 @@ class CallGuardrail:
     def _error_code(exc):
         # Only our fixed diagnostics can enter user-visible events.
         return str(exc) if isinstance(exc, GuardrailError) else 'review_failed'
+
+    def _audio_loop(self):
+        while not self.closed.is_set() and not self.call.closed.is_set():
+            try: pending = self.audio_queue.get(timeout=.2)
+            except queue.Empty: continue
+            if pending.cancelled.is_set(): continue
+            try:
+                decision = self.client.check_audio(bytes(pending.pcm), sample_rate=24000,
+                        data_id=self.call.id + '-out-' + hashlib.sha256(pending.event_id.encode()).hexdigest()[:16],
+                        cancelled=pending.cancelled)
+                with self.condition:
+                    if (self.closed.is_set() or self.call.closed.is_set()
+                            or pending.cancelled.is_set() or pending.epoch != self.call.epoch): continue
+                    self._record('output_audio', decision, event_id=pending.event_id)
+                    if not decision.allowed:
+                        self._deny('output_audio', 'risk_detected', pending.event_id); return
+                    # Untranscribable generated audio cannot be justified by
+                    # a harmless text channel. Hold it even if vendor says none.
+                    if not decision.transcript.strip():
+                        raise GuardrailError('output_audio_semantics_unrecognized')
+                    pending.audio_transcript = decision.transcript
+                    pending.audio_review_done = True
+                    self.condition.notify_all()
+            except Exception as exc:
+                with self.lock:
+                    if pending.cancelled.is_set() or pending.epoch != self.call.epoch: continue
+                    self._deny('output_audio', self._error_code(exc), pending.event_id)
+                return
 
     def _output_loop(self):
         while not self.closed.is_set() and not self.call.closed.is_set():
@@ -244,7 +342,7 @@ class CallGuardrail:
                 # No text or PCM is released until BOTH channels are complete.
                 deadline = time.monotonic() + self.config.max_answer_seconds
                 with self.condition:
-                    while not pending.audio_done:
+                    while not (pending.audio_done and pending.audio_review_done):
                         if (self.closed.is_set() or self.call.closed.is_set()
                                 or self.responses.get(pending.event_id) is not pending
                                 or pending.epoch != self.call.epoch):
@@ -257,21 +355,13 @@ class CallGuardrail:
                             or self.responses.get(pending.event_id) is not pending
                             or pending.epoch != self.call.epoch):
                         continue
-                if self.config.output_audio and pending.pcm:
-                    decision = self.client.check_audio(bytes(pending.pcm), sample_rate=24000,
-                            data_id=self.call.id + '-out-' + hashlib.sha256(pending.event_id.encode()).hexdigest()[:16], cancelled=self.closed)
-                    with self.lock:
-                        if self.closed.is_set() or self.call.closed.is_set():
-                            return
-                        if self.responses.get(pending.event_id) is not pending or pending.epoch != self.call.epoch:
-                            continue
-                        self._record('output_audio', decision, event_id=pending.event_id)
-                        if not decision.allowed:
-                            self._deny('output_audio', 'risk_detected', pending.event_id); return
+                if (self.config.output_audio and pending.pcm
+                        and not audio_text_consistent(pending.text, pending.audio_transcript)):
+                    raise GuardrailError('output_audio_text_mismatch')
                 deadline = time.monotonic() + self.config.audio_deadline
                 with self.condition:
                     while (self.input_reviewed < pending.input_barrier and not self.closed.is_set()
-                           and not self.call.closed.is_set()):
+                           and not self.call.closed.is_set() and not pending.cancelled.is_set()):
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise GuardrailError('input_review_timeout')
@@ -282,6 +372,9 @@ class CallGuardrail:
                         continue
                     self.call._emit({'type': 'guardrail_pass', 'event_id': pending.event_id,
                                      'response_complete': True,
+                                     'held_ms': round((time.monotonic() - pending.started) * 1000, 1),
+                                     'input_barrier': pending.input_barrier,
+                                     'input_reviewed': self.input_reviewed,
                                      'message': '回答已通过已启用的安全审核。'})
                     for event in pending.events:
                         if self.closed.is_set() or self.call.closed.is_set() or pending.epoch != self.call.epoch:
@@ -309,13 +402,15 @@ class CallGuardrail:
     def close(self):
         self.closed.set()
         with self.condition:
+            for pending in self.responses.values(): pending.cancelled.set()
             self.responses.clear(); self.pending_bytes = 0; self.event_count = 0
             self.input_buffer.clear(); self.input_overlap = b''
             self.condition.notify_all()
-            for tasks in (self.input_queue, self.output_queue):
+            self.input_context = ''
+            for tasks in (self.input_queue, self.output_queue, self.audio_queue):
                 while True:
                     try:tasks.get_nowait()
                     except queue.Empty:break
-        for worker in (self.output_worker, self.input_worker):
+        for worker in (self.output_worker, self.input_worker, self.audio_worker):
             if worker.is_alive() and worker is not threading.current_thread():
                 worker.join(timeout=self.config.timeout + .5)

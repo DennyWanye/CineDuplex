@@ -402,8 +402,11 @@ async function status(){
   if(Number.isInteger(s.tensor_parallel_size)&&s.tensor_parallel_size>1)$('model').textContent+=' · '+s.tensor_parallel_size+' GPU';
   const g=s.guardrail;
   $('guardrail-status').textContent=!g?'安全护栏：当前服务未报告接入状态':!g.enabled?'安全护栏未启用':
-   '阿里云护栏：回答文字审核已启用 · 输入音频'+(g.input_audio?'审核并在发现风险时停止':'未审核')+
-   ' · 回答音频'+(g.output_audio?'审核已启用':'未单独审核')+' · 审核通过后发送回答';
+   '阿里云护栏：整段回答文字审核已启用 · 输入'+(g.input_semantic?'语音转写与语义审核已启用':'语义未审核')+
+   ' · 整段回答声音'+(g.output_audio?'审核已启用':'未单独审核')+
+   (g.output_audio&&g.nonverbal_detection==='configured-unvalidated'?' · 非语言声音检测已接入，拦截效果待验证':
+    g.output_audio&&g.nonverbal_detection!=='validated'?' · 非语言声音专项检测尚未确认开通':'')+
+   ' · 已启用的审核全部通过后发送回答';
   $('guardrail-privacy').hidden=!(g?.enabled&&(g.input_audio||g.output_audio));
   $('guardrail-playback-hint').textContent=g?.enabled?'回答生成后先审核，通过后发送文字和声音；等待期间麦克风继续收音。':
    '文字和声音逐步到达。生成较慢时会先多缓存一点声音，再连续播放；麦克风保持收音。';

@@ -1,5 +1,37 @@
 # Capability and verification status
 
+## 2026-10-11 input semantics and whole-audio review
+
+Input audio now runs Aliyun standard audio moderation and then AI Guardrails
+request-semantic review on the returned transcript with bounded recent context.
+Only digital-zero audio can be omitted. Quiet-tail batching starts review early;
+model generation runs concurrently, but release waits for the input barrier.
+Whole output text and whole output audio are reviewed independently before any
+answer content is delivered. Cancellation wakes the old response's audio query
+and release wait. Only documented result code 280 is treated as pending.
+
+Standard `audio_media_detection` exposes `sexual_sounds`; the LLM audio service
+requires separate enablement for that acoustic detector. Both legacy Labels and
+LLM Result labels are parsed. The UI explicitly marks acoustic detection as
+configured but not validated. A nonempty ASR result is not proof of speech:
+Aliyun transcribed a harmless pure tone as words. A local text/audio-transcript
+consistency check now blocks that mismatch without an extra cloud request.
+This heuristic is not a calibrated acoustic classifier.
+
+Real-cloud replay blocked the reported sexual-vocal request with zero answer
+content released. Normal follow-up and generation interruption passed with input,
+request-semantic, output-text and output-audio receipts. In measured short calls,
+output-audio review took roughly 4 seconds beyond complete audio generation;
+input review overlapped generation and did not delay release further. This is
+not a zero-latency change or a matched-output performance benchmark.
+
+No representative positive sexual-sound fixture has passed an end-to-end
+acceptance test. Two previously disputed model audio excerpts still returned
+no risk from standard audio moderation. Input intent blocking and local mismatch
+checks reduce this gap, but do not prove every unsafe sound is detected. Real
+human microphone and subjective listening acceptance remain unverified. The
+previous output-only observations below describe the earlier deployment.
+
 ## 2026-10-11 safety coverage and response waiting
 
 Output-only text moderation does not establish safety of the user's spoken
@@ -7,7 +39,7 @@ request or of nonverbal synthesized sounds. A confirmed sexual-vocal request
 elicited an accommodating response; its innocuous output text received a real
 Aliyun pass. In a controlled cloud comparison, the request alone and the
 request plus answer were blocked, while the answer alone passed. Input/audio
-review remains disabled. Stronger model refusal instructions are defense in
+review was disabled in that snapshot. Stronger model refusal instructions are defense in
 depth, not proof that this coverage gap is closed.
 
 The dominant measured delay was whole-answer generation: 5–18 seconds in the

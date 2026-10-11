@@ -35,13 +35,17 @@ class Config:
     region: str = 'cn-shanghai'
     input_audio: bool = False
     output_audio: bool = False
+    nonverbal_verified: bool = False
     timeout: float = 5.0
     audio_deadline: float = 45.0
-    input_window_seconds: float = 4.0
+    input_window_seconds: float = 10.0
     max_answer_seconds: float = 60.0
     input_service: str = 'query_security_check_pro'
     output_service: str = 'response_security_check_pro'
-    audio_service: str = 'audio_detection_byllm'
+    # Standard audio includes acoustic labels. LLM audio's sexual_sounds
+    # capability requires separate vendor enablement; ASR semantics are checked
+    # independently with query_security_check_pro by CallGuardrail.
+    audio_service: str = 'audio_media_detection'
     access_key_id: str = field(default='', repr=False)
     access_key_secret: str = field(default='', repr=False)
     security_token: str = field(default='', repr=False)
@@ -77,12 +81,13 @@ class Config:
                 region=env.get('CINEDUPLEX_GUARDRAIL_REGION', 'cn-shanghai'),
                 input_audio=flag('CINEDUPLEX_GUARDRAIL_INPUT_AUDIO'),
                 output_audio=flag('CINEDUPLEX_GUARDRAIL_OUTPUT_AUDIO'),
+                nonverbal_verified=flag('CINEDUPLEX_GUARDRAIL_NONVERBAL_VERIFIED'),
                 timeout=float(env.get('CINEDUPLEX_GUARDRAIL_TIMEOUT', '5')),
                 audio_deadline=float(env.get('CINEDUPLEX_GUARDRAIL_AUDIO_DEADLINE', '45')),
-                input_window_seconds=float(env.get('CINEDUPLEX_GUARDRAIL_INPUT_WINDOW', '4')),
+                input_window_seconds=float(env.get('CINEDUPLEX_GUARDRAIL_INPUT_WINDOW', '10')),
                 input_service=env.get('CINEDUPLEX_GUARDRAIL_INPUT_SERVICE', 'query_security_check_pro'),
                 output_service=env.get('CINEDUPLEX_GUARDRAIL_OUTPUT_SERVICE', 'response_security_check_pro'),
-                audio_service=env.get('CINEDUPLEX_GUARDRAIL_AUDIO_SERVICE', 'audio_detection_byllm'),
+                audio_service=env.get('CINEDUPLEX_GUARDRAIL_AUDIO_SERVICE', 'audio_media_detection'),
                 access_key_id=env.get('ALIBABA_CLOUD_ACCESS_KEY_ID') or credentials.get('access_key_id', ''),
                 access_key_secret=env.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET') or credentials.get('access_key_secret', ''),
                 security_token=env.get('ALIBABA_CLOUD_SECURITY_TOKEN') or credentials.get('security_token', ''),
@@ -111,8 +116,13 @@ class Config:
                 'output_text_service': self.output_service if self.enabled else None,
                 'input_audio': self.enabled and self.input_audio,
                 'output_audio': self.enabled and self.output_audio,
+                'audio_service': self.audio_service if self.enabled and (self.input_audio or self.output_audio) else None,
                 'mode': 'review-before-release' if self.enabled else 'disabled',
-                'input_mode': 'monitor-and-stop' if self.enabled and self.input_audio else 'disabled',
+                'input_mode': 'parallel-review-before-release' if self.enabled and self.input_audio else 'disabled',
+                'input_semantic': self.enabled and self.input_audio,
+                'nonverbal_detection': ('validated' if self.nonverbal_verified else
+                    'configured-unvalidated' if self.audio_service == 'audio_media_detection' else 'unverified')
+                    if self.enabled and self.output_audio else 'disabled',
                 'cloud_verified': False}
 
 
@@ -124,6 +134,8 @@ class Decision:
     labels: tuple = ()
     elapsed_ms: float = 0.0
     dimensions: tuple = ()
+    # Retained in call memory for semantic review, never in public audit records.
+    transcript: str = field(default='', repr=False)
 
     def record(self):
         return {'allowed': self.allowed, 'suggestion': self.suggestion,
@@ -222,7 +234,8 @@ class AliyunGuardrail:
             raise
         except Exception:
             raise GuardrailError('cloud_response_invalid') from None
-        if not isinstance(payload, dict) or payload.get('Code') != 200:
+        # 280 is the documented asynchronous pending state, only for result queries.
+        if not isinstance(payload, dict) or payload.get('Code') not in ((200, 280) if action == 'VoiceModerationResult' else (200,)):
             raise GuardrailError('cloud_api_rejected')
         return payload
 
@@ -298,27 +311,53 @@ class AliyunGuardrail:
                 raise GuardrailError('audio_review_timeout')
             # File moderation is asynchronous. No resubmission on an ambiguous response.
             if cancelled is not None:
-                if cancelled.wait(min(2, remaining)):
+                if cancelled.wait(min(.5, remaining)):
                     raise GuardrailError('audio_review_cancelled')
             else:
-                time.sleep(min(2, remaining))
+                time.sleep(min(.5, remaining))
             payload = self.rpc('VoiceModerationResult', self.config.audio_service, {'taskId': task},
                                timeout=self._remaining(deadline))
+            if payload.get('Code') == 280:
+                continue
             data = payload.get('Data', {})
             if not isinstance(data, dict):
                 raise GuardrailError('cloud_response_incomplete')
             risk = data.get('RiskLevel')
-            if risk is None:
-                continue
             if risk not in ('none', 'low', 'medium', 'high'):
                 raise GuardrailError('audio_result_invalid')
-            slices = data.get('SliceDetails', [])
+            slices = data.get('SliceDetails')
             if not isinstance(slices, list):
                 raise GuardrailError('audio_result_invalid')
-            allowed = risk == 'none'
+            allowed = risk == 'none'; labels = set(); texts = []
             for part in slices:
                 if not isinstance(part, dict) or part.get('RiskLevel') not in ('none', 'low', 'medium', 'high'):
                     raise GuardrailError('audio_result_invalid')
                 allowed = allowed and part['RiskLevel'] == 'none'
+                text = part.get('Text', '')
+                if not isinstance(text, str):
+                    raise GuardrailError('audio_result_invalid')
+                texts.append(text)
+                # Standard audio moderation uses Labels; the LLM service also
+                # returns detailed Result entries. Honor both representations.
+                raw_labels = part.get('Labels', '')
+                if not isinstance(raw_labels, str):
+                    raise GuardrailError('audio_result_invalid')
+                for label in filter(None, raw_labels.split(',')):
+                    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', label):
+                        raise GuardrailError('audio_result_invalid')
+                    labels.add(label)
+                    allowed = allowed and label != 'sexual_sounds'
+                results = part.get('Result', [])
+                if not isinstance(results, list):
+                    raise GuardrailError('audio_result_invalid')
+                for result in results:
+                    if not isinstance(result, dict) or result.get('RiskLevel') not in ('none', 'low', 'medium', 'high'):
+                        raise GuardrailError('audio_result_invalid')
+                    label = result.get('Label')
+                    if not isinstance(label, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', label):
+                        raise GuardrailError('audio_result_invalid')
+                    labels.add(label)
+                    allowed = allowed and result['RiskLevel'] == 'none' and label != 'sexual_sounds'
             return Decision(allowed, 'pass' if allowed else 'block', str(payload.get('RequestId', ''))[:128],
-                            (), (time.monotonic() - begun) * 1000)
+                            tuple(sorted(labels)), (time.monotonic() - begun) * 1000,
+                            ('audio', self.config.audio_service), '\n'.join(texts))
