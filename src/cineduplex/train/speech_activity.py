@@ -12,6 +12,10 @@ MODEL_SHA256 = '1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
 
 class SpeechEvidence:
     """Hysteresis with a new utterance ID, independent of loudness and SL score."""
+    # Eight 32ms windows require 256ms of strong speech evidence.
+    # A 96ms transient must not create a reply or cancel active playback.
+    START_FRAMES = 8
+
     def __init__(self):
         self.active = False
         self.utterance = 0
@@ -25,7 +29,7 @@ class SpeechEvidence:
         if probability >= .5:
             self.high_frames += 1
             self.quiet_frames = 0
-            if not self.active and self.high_frames >= 3:
+            if not self.active and self.high_frames >= self.START_FRAMES:
                 self.active = True
                 self.utterance += 1
                 started = True

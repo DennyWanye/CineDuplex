@@ -19,4 +19,4 @@ where = ["src"]
 include = ["cineduplex", "cineduplex.data", "cineduplex.guardrail", "cineduplex.train", "cineduplex.web", "cineduplex.cluster"]
 
 [tool.setuptools.package-data]
-"cineduplex.web" = ["*.html", "*.js"]
+"cineduplex.web" = ["*.html", "*.js", "*.css", "*.png"]

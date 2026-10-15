@@ -13,8 +13,70 @@ let pendingSpeech=new Map(),completedReplies=0,lastBufferWait=0;
 let producerRatio=1,playbackUnderruns=0;
 let nativeState='L';
 let speakingCompute=[];
+let prefixDeliveryDeficits=[];
 let playbackBus=null,playbackBridge=null,playbackClock=null;
 let diagnosticQueue=[],diagnosticSeq=0,diagnosticCall=null,diagnosticBusy=false,diagnosticTimer=null,diagnosticDropped=0,lastProcessedSeconds=0;
+const userPage=document.body?.dataset?.view==='voice';
+let userMuted=false,userStarting=false,userEndedReason='',userRms=0,captionsVisible=false,endingCall=null;
+let callStopMessage='';
+function playingNode(){
+ if(!context)return null;
+ return [...sources].find(s=>!s.cineduplexCancelled&&s.cineduplexStart<=context.currentTime&&context.currentTime<s.cineduplexStart+s.buffer.duration)||null;
+}
+function refreshUserView(){
+ if(!userPage)return;
+ const active=!!call,opening=userStarting||permissionPending,busy=active||opening||stopping;
+ const audible=playingNode();let state='idle',title='你好，我是小橙',description='点一下，聊聊你的想法';
+ if(stopping){state='ending';title='正在结束通话';description='正在关闭麦克风…';}
+ else if(permissionPending){state='permission';title='开启麦克风，开始聊天';description='请在浏览器提示中允许麦克风权限';}
+ else if(opening&&!capture){state='connecting';title='正在接通小橙';description='麦克风已开启，正在建立通话';}
+ else if(active){
+  if(audible){state='speaking';title='小橙正在说话';description=userMuted?'麦克风已静音，你仍可以听到回答':'直接说话，也可以随时打断我';}
+  else if(pendingSpeech.size||reviewPending.size||nativeState==='S'||nativeState==='B'){state='preparing';title='正在准备回答';description=userMuted?'麦克风已静音，正在等待回答':'麦克风保持开启，你可以继续说话';}
+  else if(userMuted){state='muted';title='麦克风已静音';description='点一下“取消静音”，继续聊天';}
+  else{state='listening';title='正在听你说';description='直接说话，也可以随时打断我';}
+ }else if(userEndedReason){title='通话已结束';description=userEndedReason==='通话已结束'?'想继续聊？再点一下开始。':userEndedReason;}
+ document.body.dataset.callState=state;
+ $('voice-title').textContent=title;$('voice-description').textContent=description;
+ $('start-area').hidden=busy;$('call-controls').hidden=!busy;$('duration').hidden=!active;
+ if($('output-device'))$('output-device').disabled=busy;
+ $('mute').disabled=!active||stopping;$('mute').setAttribute('aria-pressed',String(userMuted));
+ $('mute-label').textContent=userMuted?'取消静音':'静音';$('mute-icon').setAttribute('href',userMuted?'#i-mic-off':'#i-mic');
+ $('settings-note').textContent=busy?'通话进行中，声音和麦克风可在结束后更换。字幕可随时开启。':'设置会用于下一次通话。通话中也可以直接说“请改用中文”。';
+ if(busy){$('service-message').textContent=stopping?'正在结束':active?(userMuted?'麦克风已静音':'麦克风已开启'):'正在接通…';}
+ document.body.dataset.serviceReady=String(ready||active);
+ paintVoiceWave(audible);
+}
+function paintVoiceWave(node=playingNode()){
+ if(!userPage)return;
+ let rms=(!userMuted&&call)?userRms:0;
+ if(node){
+  const data=node.buffer.getChannelData(0),start=Math.floor((context.currentTime-node.cineduplexStart)*node.buffer.sampleRate);
+  let sum=0,count=0;for(let i=start;i<Math.min(start+256,data.length);i+=4){sum+=data[i]*data[i];count++;}
+  rms=count?Math.sqrt(sum/count):0;
+ }
+ const wave=$('voice-wave');wave.classList.toggle('live',!!call&&rms>.003);
+ [...wave.children].forEach((bar,i)=>{bar.style.height=(5+Math.min(1,rms*10)*[10,18,25,17,32,20,27,16,9][i])+'px';});
+}
+function toggleMute(){
+ if(!call||!stream||stopping)return;
+ userMuted=!userMuted;stream.getAudioTracks().forEach(track=>{track.enabled=!userMuted;});
+ if(userMuted){sendQueue.forEach(pcm=>new Uint8Array(pcm).fill(0));userRms=0;silentSince=0;$('mic-warning').hidden=true;}
+ diagnostic('transport_sample',{reason:'microphone_mute',muted:userMuted});refreshUserView();
+}
+function toggleCaptions(){
+ captionsVisible=!captionsVisible;$('caption-panel').hidden=!captionsVisible;
+ $('captions-toggle').setAttribute('aria-pressed',String(captionsVisible));
+ $('captions-label').textContent=captionsVisible?'隐藏字幕':'显示字幕';
+ $('transcript').setAttribute('aria-live',captionsVisible?'polite':'off');
+}
+function microphoneError(e){
+ if(['NotAllowedError','PermissionDeniedError','SecurityError'].includes(e.name))return '麦克风权限未开启。请在浏览器的网站设置中允许麦克风，再试一次。';
+ if(['NotFoundError','DevicesNotFoundError'].includes(e.name))return '没有找到麦克风。请连接麦克风后再试一次。';
+ if(['NotReadableError','TrackStartError'].includes(e.name))return '麦克风暂时无法使用。请检查系统设置，或关闭正在占用麦克风的应用。';
+ if(e.name==='OverconstrainedError')return '所选麦克风不可用，请在设置里选择其他麦克风。';
+ return e.message||'通话暂时无法连接，请稍后重试。';
+}
 function diagnostic(type,details={}){
  if(!diagnosticCall)return;
  diagnosticQueue.push({type,client_seq:diagnosticSeq++,at:Date.now()/1000,
@@ -50,6 +112,11 @@ function playbackConnected(peer){
   peer.addEventListener('connectionstatechange',changed);changed();
  });
 }
+async function selectPlaybackDevice(target){
+ const selected=$('output-device')?.value||'';
+ if(typeof target.setSinkId==='function'){await target.setSinkId(selected);return;}
+ if(selected)throw Error('浏览器不支持选择播放设备，请使用系统默认设备。');
+}
 async function setupPlayback(){
  playbackBus=context.createGain();
  // Keep the MediaStream destination clock running through silent gaps. A
@@ -57,7 +124,7 @@ async function setupPlayback(){
  playbackClock=context.createConstantSource();playbackClock.offset.value=0;
  playbackClock.connect(playbackBus);playbackClock.start();
  if(typeof RTCPeerConnection==='undefined'){
-  playbackBus.connect(context.destination);$('echo-status').textContent='浏览器不支持通话播放参考，请使用耳机';return;
+  await selectPlaybackDevice(context);playbackBus.connect(context.destination);$('echo-status').textContent='浏览器不支持通话播放参考，请使用耳机';return;
  }
  // Local peer pair only: no STUN/TURN server and no microphone track. The
  // received playback track gives browser AEC its documented remote reference.
@@ -80,10 +147,11 @@ async function setupPlayback(){
   await rx.setLocalDescription(await rx.createAnswer());await tx.setRemoteDescription(rx.localDescription);
   for(const candidate of pendingTx)await tx.addIceCandidate(candidate);
   await received;clearTimeout(timeout);await Promise.all([playbackConnected(tx),playbackConnected(rx)]);playbackBus.connect(destination);
+  await selectPlaybackDevice(player);
   await Promise.race([player.play(),new Promise((_,reject)=>setTimeout(()=>reject(Error('浏览器未开启通话声音播放')),5000))]);
   $('echo-status').textContent='通话播放参考已连接 · 麦克风持续收音';
  }catch(e){
-  clearTimeout(timeout);closePlaybackBridge();playbackBus.connect(context.destination);
+  clearTimeout(timeout);closePlaybackBridge();await selectPlaybackDevice(context);playbackBus.connect(context.destination);
   $('echo-status').textContent='通话播放参考不可用，请使用耳机 · '+e.message;
  }
 }
@@ -99,6 +167,7 @@ function describeEcho(track){
  $('echo-status').textContent='麦克风回声消除'+state+' · '+(playbackBridge?'通话播放参考已连接':'请使用耳机');
 }
 function showState(){
+ if(userPage){refreshUserView();return;}
  const playing=sources.size>0,preparing=pendingSpeech.size>0;
  $('state').textContent=playing?'正在播放回答，也在收音':preparing?'正在准备回答，也在收音':states[nativeState]||nativeState;
  $('orb').textContent=playing?'播放':preparing?'准备':{L:'聆听',S:'回答',B:'回应'}[nativeState]||nativeState;
@@ -111,11 +180,20 @@ const endReasons={hangup:'通话已结束',context_limit:'本次通话已达到�
  service_stop:'服务已停止',guardrail_blocked:'内容未通过安全审核，通话已停止',
  guardrail_unavailable:'安全审核未完成，通话已停止'};
 async function api(url,opts){const r=await fetch(entryUrl(url),opts),j=await r.json();if(!r.ok){const e=Error(j.error||'连接失败');e.status=r.status;throw e;}return j;}
-function error(message){if(message)diagnostic('client_error',{message});$('error').hidden=!message;$('error').className='error';$('error').textContent=message;}
+function error(message){if(message)diagnostic('client_error',{message});$('error').hidden=!message;$('error').className=userPage?'notice error':'error';$('error').textContent=message;}
 function event(message){const d=document.createElement('div');d.className='event';d.textContent=new Date().toLocaleTimeString()+' · '+message;$('events').prepend(d);while($('events').children.length>20)$('events').lastChild.remove();}
-function clearPlayback(){if(sources.size)diagnostic('audio_cancel',{reason:'interrupt_or_stop',source_nodes:sources.size});pendingSpeech.clear();for(const s of sources){s.cineduplexCancelled=true;try{s.stop()}catch{}}sources.clear();if(playbackBridge)playbackBridge.player.muted=true;if(context)playAt=context.currentTime;}
+const reviewPending=new Set();
+function clearPlayback(){if(sources.size)diagnostic('audio_cancel',{reason:'interrupt_or_stop',source_nodes:sources.size});pendingSpeech.clear();reviewPending.clear();for(const s of sources){s.cineduplexCancelled=true;try{s.stop()}catch{}}sources.clear();if(playbackBridge)playbackBridge.player.muted=true;if(context)playAt=context.currentTime;}
 function bufferTarget(ratio){return Math.min(3.2,1.0+Math.max(0,ratio-1)*12);}
 function initialReserve(reply){
+ if(reply.reviewedPrefix){
+  // Size the runway for observed delivery deficits, including cloud jitter.
+  // Short completed answers can have zero delivery deficit. They do not
+  // prove that the next streaming answer has a faster cloud receipt. Keep
+  // the measured 2.67s interval minus the 1.28s prefix plus 0.2s margin.
+  const recent=prefixDeliveryDeficits.slice(-32).sort((a,b)=>a-b);
+  return recent.length?Math.min(2.2,Math.max(1.6,recent[Math.floor((recent.length-1)*.9)]+.2)):1.6;
+ }
  const recent=speakingCompute.slice(-12).sort((a,b)=>a-b);
  const modelRatio=recent.length?recent[Math.floor((recent.length-1)*.9)]/400:1;
  const rate=Math.max(1.25,producerRatio,modelRatio);
@@ -134,9 +212,18 @@ function initialReserve(reply){
  return Math.min(6,Math.max(3.5,reply.initialLead,
   .6+Math.max(.25,rate-1)*(estimatedSeconds-1)*1.5));
 }
+function refillReserve(reply){
+ if(!reply.reviewedPrefix)return Math.max(1.6,reply.target,bufferTarget(Math.max(producerRatio,...reply.ratios)));
+ // Once continuity has already failed, preserve a multi-block runway. A
+ // first-sound cap must not also cap recovery from a several-second cloud
+ // receipt stall. Input and native interruption remain independent.
+ const recent=prefixDeliveryDeficits.slice(-32).sort((a,b)=>a-b);
+ const deficit=recent.length?recent[Math.floor((recent.length-1)*.9)]:0;
+ return Math.min(9.6,Math.max(6.4,deficit+.4,reply.target+.8));
+}
 function newReply(e){return {id:e.event_id,chunks:[],length:0,totalLength:0,packets:0,rate:e.sample_rate||24000,
- epoch:e.epoch,firstAt:performance.now(),streaming:!!e.streaming&&e.response_complete!==true,completeAvailable:e.response_complete===true,started:false,finished:false,nodes:0,completed:false,
- target:1.0,initialLead:.85,lastAudioAt:null,ratios:[],rebuffering:false};}
+ epoch:e.epoch,firstAt:performance.now(),streaming:!!e.streaming&&e.response_complete!==true,reviewedPrefix:e.reviewed_prefix===true,completeAvailable:e.response_complete===true,started:false,finished:false,nodes:0,completed:false,
+ target:e.reviewed_prefix===true?2.8:1.0,initialLead:.85,lastAudioAt:null,firstAudioAt:null,ratios:[],rebuffering:false};}
 function receiveAudio(e){
  if(!context||e.epoch<epoch)return;
  const {pcm,sample_rate:rate,event_id:id}=e;
@@ -145,6 +232,14 @@ function receiveAudio(e){
  if(!reply){reply=newReply(e);pendingSpeech.set(id,reply);}
  if(rate!==reply.rate||raw.length%2)throw Error('输出音频格式发生变化，请重新连接');
  const out=new Float32Array(raw.length/2);for(let i=0;i<out.length;i++)out[i]=view.getInt16(i*2,true)/32768;
+ if(reply.reviewedPrefix){
+  const arrival=performance.now()/1000;
+  if(reply.firstAudioAt===null)reply.firstAudioAt=arrival;
+  else{
+   prefixDeliveryDeficits.push(Math.max(0,arrival-reply.firstAudioAt-reply.totalLength/reply.rate));
+   if(prefixDeliveryDeficits.length>64)prefixDeliveryDeficits.shift();
+  }
+ }
  const at=Number.isFinite(e.at)?e.at:performance.now()/1000;
  if(reply.lastAudioAt!==null&&!e.final_chunk&&out.length/rate>=.25){
   const ratio=Math.max(0,at-reply.lastAudioAt)/(e.codec_advance_seconds||out.length/rate);reply.ratios.push(ratio);
@@ -172,7 +267,11 @@ function receiveAudio(e){
  if(reply.streaming){
   if(reply.started&&!reply.rebuffering&&playAt<context.currentTime-.08){
    playbackUnderruns++;reply.rebuffering=true;diagnostic('rebuffer',{event_id:id,count:playbackUnderruns,ahead_seconds:playAt-context.currentTime});
-   reply.target=Math.max(1.6,reply.target,bufferTarget(Math.max(producerRatio,...reply.ratios)));
+   // A reviewed stream includes cloud jitter as well as model production.
+   // After an actual underrun, rebuild multiple blocks instead of starting
+   // each new block immediately and repeating the same short gap. This never
+   // delays the first sound and is cancelled immediately on a native interrupt.
+   reply.target=refillReserve(reply);
    event('生成速度不足，正在补充连续播放缓冲 · 第 '+playbackUnderruns+' 次');
    transport();
   }
@@ -187,10 +286,13 @@ function scheduleReply(reply){
  const audio=context.createBuffer(1,reply.length,reply.rate),out=audio.getChannelData(0);
  let offset=0;for(const chunk of reply.chunks){out.set(chunk,offset);offset+=chunk.length;}
  const packets=reply.chunks.length+(reply.carriedPackets||0);reply.carriedPackets=0;reply.chunks=[];reply.length=0;
- const node=context.createBufferSource();node.buffer=audio;node.connect(playbackBus||context.destination);
+ const node=context.createBufferSource();node.buffer=audio;node.cineduplexMessageId=reply.id;node.connect(playbackBus||context.destination);
  if(playbackBridge)playbackBridge.player.muted=false;
  if(!reply.started){
   reply.initialLead=reply.finished?.04:initialReserve(reply);
+  // Queued PCM is already playable duration. The reserve protects the next
+  // receipt, including its sealed input review, and must not be subtracted
+  // merely because the provider coalesced preceding blocks.
   diagnostic('initial_buffer',{event_id:reply.id,lead_seconds:reply.initialLead,producer_ratio:producerRatio});
   lastBufferWait=(performance.now()-reply.firstAt)/1000+(reply.finished?.04:reply.initialLead);
   event('开始播放回答 · 收到声音后的缓冲 '+lastBufferWait.toFixed(1)+' 秒');reply.started=true;
@@ -222,7 +324,7 @@ function updateAudioStatus(){
  else $('audio-status').textContent='等待回答 · 已播放 '+completedReplies+' 次';
  showState();
 }
-function transcript(e){const id=e.event_id||'current';let p=utterances.get(id);if(!p){p=document.createElement('div');p.className='utterance';$('transcript').append(p);utterances.set(id,p);}p.textContent=e.snapshot||e.text||'';$('transcript').scrollTop=$('transcript').scrollHeight;}
+function transcript(e){const id=e.event_id||'current';let p=utterances.get(id);if(!p){p=document.createElement('div');p.className='utterance';$('transcript').append(p);utterances.set(id,p);}p.textContent=e.snapshot||e.text||'';$('transcript').scrollTop=$('transcript').scrollHeight;if(userPage)$('caption-placeholder').hidden=!!p.textContent;}
 async function poll(id){
  while(call===id&&!stopping){
   try{
@@ -231,16 +333,17 @@ async function poll(id){
    if(j.events.some(e=>e.type==='audio'))diagnostic('transport_sample',{poll_wait_ms:performance.now()-pollBegin});
    for(const e of j.events){
     eventSeq=e.seq;
+    window.voiceMessages?.onEvent(e);
     if(e.type==='audio_start'&&e.epoch>=epoch){pendingSpeech.set(e.event_id,newReply(e));updateAudioStatus();}
     if(e.type==='audio'){receiveAudio(e);updateAudioStatus();}
     if(e.type==='audio_end')finishAudio(e);
     if(e.type==='response_warning'){$('response-warning').hidden=false;$('response-warning').textContent=e.message;event(e.message);}
     if(e.type==='session_warning'){$('response-warning').hidden=false;$('response-warning').textContent=e.message;event(e.message);}
-    if(e.type==='guardrail_pending'){$('guardrail-status').textContent=e.message;}
+    if(e.type==='guardrail_pending'){reviewPending.add(e.event_id);$('guardrail-status').textContent=e.message;showState();}
     if(e.type==='safety_outcome'){$('guardrail-status').textContent=e.message;event(e.message);}
-    if(e.type==='guardrail_pass'){$('guardrail-status').textContent=e.message;}
-    if(e.type==='guardrail_cancelled'){$('guardrail-status').textContent=e.message;event(e.message);}
-    if(e.type==='guardrail_block'){clearPlayback();$('guardrail-status').textContent=e.message;error(e.message);event(e.message);}
+    if(e.type==='guardrail_pass'){if(e.response_complete)reviewPending.delete(e.event_id);$('guardrail-status').textContent=e.message;}
+    if(e.type==='guardrail_cancelled'){reviewPending.delete(e.event_id);$('guardrail-status').textContent=e.message;event(e.message);showState();}
+    if(e.type==='guardrail_block'){callStopMessage=e.message||'';clearPlayback();$('guardrail-status').textContent=e.message;error(e.message);event(e.message);}
     if(e.type==='stop_audio'){epoch=e.epoch;clearPlayback();updateAudioStatus();event('模型回到聆听，已清空待播放声音');}
     if(e.type==='state_change'){nativeState=e.to;showState();event(states[e.to]||e.to);}
     if(e.type==='generation_end'){nativeState='L';showState();}
@@ -254,10 +357,10 @@ async function poll(id){
       $('compute').textContent=Math.round(average)+' ms';
      }
      nativeState=e.state;showState();
-     if(e.pending_seconds>3)$('state').textContent+=' · 处理速度落后于输入';
+     if(e.pending_seconds>3&&!userPage)$('state').textContent+=' · 处理速度落后于输入';
     }
     if(e.type==='error'){error(e.message);event('通话发生错误');await stop(false);return;}
-    if(e.type==='closed'||e.type==='session_stopping'){const reason=endReasons[e.reason]||('通话结束：'+e.reason);event(reason);await stop(false,reason);return;}
+    if(e.type==='closed'||e.type==='session_stopping'){const reason=(e.reason?.startsWith('guardrail_')&&callStopMessage)||endReasons[e.reason]||('通话结束：'+e.reason);event(reason);await stop(false,reason);return;}
    }
    if(j.closed){await stop(false);return;}
   }catch(e){if(e.name==='AbortError')return;error(e.message);await stop();return;}
@@ -265,23 +368,31 @@ async function poll(id){
 }
 function monitorMic(rms){
  if(replaying)return;
+ userRms=userMuted?0:rms;
  const db=rms>0?20*Math.log10(rms):-Infinity;
  if(Date.now()-lastLevelUpdate>600){$('mic-info').textContent=micLabel+' · 输入音量 '+(Number.isFinite(db)?Math.round(db)+' dB':'静音');lastLevelUpdate=Date.now();}
  if(rms<.0005){if(!silentSince)silentSince=Date.now();}else silentSince=0;
  const track=stream?.getAudioTracks()[0];
  const weak=!!silentSince&&Date.now()-silentSince>8000;
- $('mic-warning').hidden=!(weak||track?.muted);
+ $('mic-warning').hidden=userMuted||!(userPage?track?.muted:weak||track?.muted);
  $('mic-warning').textContent=track?.muted?'浏览器的麦克风轨道已静音。请检查系统或耳机的静音开关。':'当前输入几乎是静音。如果你正在说话，请结束后选择正确的麦克风，并点击检查麦克风。';
 }
 async function listMics(){
  if(!navigator.mediaDevices?.enumerateDevices)return;
  const current=$('mic-device').value;
- const devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audioinput');
+ const inventory=await navigator.mediaDevices.enumerateDevices();
+ const devices=inventory.filter(d=>d.kind==='audioinput');
+ const output=$('output-device');
+ if(output){
+  const previous=output.value,choices=[new Option('系统默认播放设备','')];
+  inventory.filter(d=>d.kind==='audiooutput').forEach((d,i)=>choices.push(new Option(d.label||'播放设备 '+(i+1),d.deviceId)));
+  output.replaceChildren(...choices);if(choices.some(o=>o.value===previous))output.value=previous;
+ }
  const options=[new Option('系统默认麦克风','')];
  devices.forEach((d,i)=>options.push(new Option(d.label||'麦克风 '+(i+1),d.deviceId)));
  $('mic-device').replaceChildren(...options);if(options.some(o=>o.value===current))$('mic-device').value=current;
 }
-function enqueue(pcm,rms=0){monitorMic(rms);if(micChecking){$('level').value=rms;return;}if(!call||stopping)return;$('level').value=rms;sendQueue.push(pcm);if(sendQueue.length>12){error('网络发送积压，通话已结束。');stop();return;}pump();}
+function enqueue(pcm,rms=0){if(userMuted){new Uint8Array(pcm).fill(0);rms=0;}monitorMic(rms);if(micChecking){$('level').value=rms;return;}if(!call||stopping)return;$('level').value=rms;sendQueue.push(pcm);if(sendQueue.length>12){error('网络发送积压，通话已结束。');stop();return;}pump();}
 async function uploadAudio(id,seq,pcm){
  // A response can be lost after acceptance. The server deduplicates the
  // unchanged sequence number under its input lock; never retry new bytes.
@@ -310,33 +421,36 @@ async function pump(){
  }}catch(e){if(call===id){error(e.message);await stop();}}finally{if(sending===id)sending=false;}
 }
 async function connect(requestId=null){
- error('');context=new AudioContext();await context.resume();
+ error('');callStopMessage='';context=new AudioContext();await context.resume();
  await setupPlayback();
  if(requestId!==null&&requestId!==micRequest)throw Error('通话启动已取消');
  const j=await api('/api/calls',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({variant:$('variant').value,voice:$('voice').value,language:$('language').value})});
  if(requestId!==null&&requestId!==micRequest){await api('/api/calls/'+j.id+'/stop',{method:'POST',body:''});throw Error('通话启动已取消');}
  call=j.id;audioSeq=0;eventSeq=0;epoch=0;sendQueue=[];playAt=context.currentTime;started=Date.now();stopping=false;
- sentPackets=0;receivedPackets=0;playedPackets=0;completedReplies=0;lastBufferWait=0;producerRatio=1;playbackUnderruns=0;speakingCompute=[];$('compute').textContent='尚未回答';pendingSpeech.clear();transport();updateAudioStatus();
+ sentPackets=0;receivedPackets=0;playedPackets=0;completedReplies=0;lastBufferWait=0;producerRatio=1;playbackUnderruns=0;speakingCompute=[];prefixDeliveryDeficits=[];$('compute').textContent='尚未回答';pendingSpeech.clear();transport();updateAudioStatus();
  diagnosticCall=call;diagnosticQueue=[];diagnosticSeq=0;diagnosticDropped=0;lastProcessedSeconds=0;
  $('call-id').textContent=call;$('report').href=entryUrl('/api/calls/'+call+'/diagnostics');$('report').hidden=false;$('mark-problem').disabled=false;
  const settings=stream?.getAudioTracks()[0]?.getSettings()||{};
  diagnostic('client_config',{precision:j.decode_precision,runtime_sha256:j.tp_runtime_sha256||j.runtime_sha256||j.source_sha256,tensor_parallel_size:j.tensor_parallel_size||1,voice:$('voice').value,language:$('language').value,
   echo_cancellation:settings.echoCancellation,noise_suppression:settings.noiseSuppression,auto_gain_control:settings.autoGainControl,
-  input_sample_rate:settings.sampleRate,context_sample_rate:context.sampleRate,reference_connected:!!playbackBridge,browser:navigator.userAgent});
+  input_sample_rate:settings.sampleRate,context_sample_rate:context.sampleRate,reference_connected:!!playbackBridge,output_device:$('output-device')?.selectedOptions[0]?.textContent||'system-default',browser:navigator.userAgent});
  diagnosticTimer=setInterval(()=>sampleTransport().catch(()=>{}),2000);
  nativeState='L';$('response-warning').hidden=true;
  pollAbort=new AbortController();utterances=new Map();$('transcript').replaceChildren();$('events').replaceChildren();
- $('start').disabled=true;$('replay').disabled=true;$('variant').disabled=true;$('voice').disabled=true;$('language').disabled=true;$('stop').disabled=false;
+ $('start').disabled=true;if($('replay'))$('replay').disabled=true;$('variant').disabled=true;$('voice').disabled=true;$('language').disabled=true;$('stop').disabled=false;
  $('orb').classList.add('active');$('orb').textContent='聆听';$('state').textContent=states.L;
  event('通话已连接 · '+$('language').selectedOptions[0].textContent+' · '+($('voice').value==='male'?'男声':'女声')+' · '+($('variant').value==='trained'?'本次训练模型 · 稳定模式':'原始模型'));
- timer=setInterval(()=>{let s=Math.floor((Date.now()-started)/1000);$('duration').textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');$('playback').textContent=Math.max(0,playAt-context.currentTime).toFixed(1)+' 秒';},250);
+ timer=setInterval(()=>{let s=Math.floor((Date.now()-started)/1000);$('duration').textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');$('playback').textContent=Math.max(0,playAt-context.currentTime).toFixed(1)+' 秒';if(userPage)refreshUserView();},250);
  poll(call);return call;
 }
 async function start(checkOnly=false){
  if(permissionPending||call||micChecking)return;
+ userStarting=true;userMuted=false;userRms=0;userEndedReason='';
+ if(userPage){error('');$('response-warning').hidden=true;$('mic-warning').hidden=true;$('transcript').replaceChildren();utterances.clear();}
  const requestId=++micRequest;permissionPending=true;$('start').disabled=true;$('stop').disabled=false;
  $('mic-check').disabled=true;$('mic-device').disabled=true;
  $('state').textContent='等待麦克风授权，请在浏览器或系统提示中允许';
+ refreshUserView();
  try{
   if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia)throw Error('麦克风需要受信任的 HTTPS 或 localhost 页面。请使用局域网证书入口。');
   // Permission precedes session creation, so denying it does not occupy GPU.
@@ -351,11 +465,13 @@ async function start(checkOnly=false){
   await context.audioWorklet.addModule(entryUrl('/capture.worklet.js'));
   capture=new AudioWorkletNode(context,'continuous-capture');capture.port.onmessage=e=>enqueue(e.data.pcm,e.data.rms);
   micSource=context.createMediaStreamSource(stream);micSource.connect(capture);capture.connect(context.destination);
-  stream.getAudioTracks()[0].onended=()=>stop();
- }catch(e){if(requestId!==micRequest)return;permissionPending=false;error(e.message);await stop();}
+  stream.getAudioTracks()[0].onended=()=>stop(true,'麦克风已断开，请检查设备后重新开始。');
+  userStarting=false;refreshUserView();
+ }catch(e){if(requestId!==micRequest)return;permissionPending=false;error(userPage?microphoneError(e):e.message);await stop();}
 }
 async function stop(remote=true,reason='通话已结束'){
- if(stopping)return;stopping=true;const id=call;diagnostic('call_stop',{reason,sent_packets:sentPackets,received_packets:receivedPackets,played_packets:playedPackets});clearInterval(diagnosticTimer);call=null;$('mark-problem').disabled=true;
+ if(stopping)return;window.voiceMessages?.onStop(reason);stopping=true;const id=call;if(id)endingCall=id;diagnostic('call_stop',{reason,sent_packets:sentPackets,received_packets:receivedPackets,played_packets:playedPackets});clearInterval(diagnosticTimer);call=null;$('mark-problem').disabled=true;
+ refreshUserView();userStarting=false;userMuted=false;userRms=0;userEndedReason=reason;
  micRequest++;permissionPending=false;micChecking=false;$('mic-device').disabled=false;$('mic-check').disabled=false;
  pollAbort?.abort();uploadAbort?.abort();uploadAbort=null;sending=false;sendQueue=[];clearInterval(timer);clearPlayback();
  if(capture){capture.port.onmessage=null;capture.disconnect();capture=null;}if(micSource){micSource.disconnect();micSource=null;}
@@ -369,14 +485,15 @@ async function stop(remote=true,reason='通话已结束'){
  $('stop').disabled=true;$('variant').disabled=false;$('voice').disabled=false;$('language').disabled=false;replaying=false;stopping=false;
  const flushDeadline=Date.now()+2500;while(diagnosticQueue.length&&Date.now()<flushDeadline){if(diagnosticBusy)await new Promise(r=>setTimeout(r,50));else await flushDiagnostics();}
  await status();
+ refreshUserView();
 }
 async function replay(){
  let file=$('file').files[0];if(!file)return;$('replay').disabled=true;
  try{
-  if(file.size>10*1024*1024)throw Error('测试录音最多10MB');
+  if(file.size>20*1024*1024)throw Error('测试录音最多20MB');
   const decode=new OfflineAudioContext(1,1,16000);
   const audio=await decode.decodeAudioData(await file.arrayBuffer());
-  if(audio.duration>310)throw Error('流式测试录音最多310秒');
+  if(audio.duration>600)throw Error('流式测试录音最多10分钟');
   const offline=new OfflineAudioContext(1,Math.round((audio.duration+12)*16000),16000);
   const src=offline.createBufferSource();src.buffer=audio;src.connect(offline.destination);src.start();
   const data=(await offline.startRendering()).getChannelData(0);replaying=true;const id=await connect();
@@ -389,7 +506,7 @@ async function replay(){
   }
   if(call===id){event('测试音频已发送，等待模型处理');while(call===id&&sendQueue.length)await new Promise(r=>setTimeout(r,200));
    const deadline=Date.now()+120000;await new Promise(r=>setTimeout(r,2000));
-   while(call===id&&(lastProcessedSeconds<data.length/16000-.1||pendingSpeech.size||sources.size)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,250));
+   while(call===id&&(lastProcessedSeconds<data.length/16000-.1||reviewPending.size||pendingSpeech.size||sources.size)&&Date.now()<deadline)await new Promise(r=>setTimeout(r,250));
    if(call===id)await stop();}
  }catch(e){error(e.message);await stop();}
 }
@@ -397,24 +514,38 @@ async function status(){
  if(call||micChecking)return;
  try{const s=await api('/api/status');ready=!!s.ready;
   $('connection').textContent=ready?(s.active?'已有通话进行中':'实时模型已就绪'):(s.phase==='storage_disconnected'?'存储连接已断开':s.phase==='updating'?'正在更新实时接口':'实时模型正在加载');
-  if(s.active)ready=false;
+  if(s.active)ready=false;else endingCall=null;
+  if(userPage)$('service-message').textContent=ready?(userEndedReason?'服务已就绪，可重新通话':'可以开始聊天'):s.active?(s.active===endingCall?'上一通通话正在结束，请稍等':'小橙正在另一通通话中，请稍后再试'):s.phase==='loading'?'小橙正在准备，请稍等':'暂时无法接通，请稍后再试';
   $('model').textContent=(s.model||'模型未加载')+' · '+(s.control_mode==='native-full-duplex'?'原生听说控制':'等待实时接口')+(s.decode_precision==='bf16'?' · BF16 原精度 · 无权重量化':s.decode_precision?.startsWith('int4')?' · INT4 权重量化':'');
   if(s.trained_adapter_scale!==undefined)$('model').textContent+=' · 训练适配强度 '+Math.round(s.trained_adapter_scale*100)+'%';
   if(Number.isInteger(s.tensor_parallel_size)&&s.tensor_parallel_size>1)$('model').textContent+=' · '+s.tensor_parallel_size+' GPU';
   const g=s.guardrail;
   $('guardrail-status').textContent=!g?'安全护栏：当前服务未报告接入状态':!g.enabled?'安全护栏未启用':
-   '阿里云护栏：整段回答文字审核已启用 · 输入'+(g.input_semantic?'语音转写与语义审核已启用':'语义未审核')+
-   ' · 整段回答声音'+(g.output_audio?'审核已启用':'未单独审核')+
+   '阿里云护栏：回答文字审核已启用 · 输入'+(g.input_semantic?'语音转写与语义审核已启用':'语义未审核')+
+   ' · 回答声音'+(g.output_audio?'审核已启用':'未单独审核')+
    (g.output_audio&&g.nonverbal_detection==='configured-unvalidated'?' · 非语言声音检测已接入，拦截效果待验证':
     g.output_audio&&g.nonverbal_detection!=='validated'?' · 非语言声音专项检测尚未确认开通':'')+
-   ' · 已启用的审核全部通过后发送回答';
+   (g.mode==='reviewed-prefix'?' · 累计审核，逐段放行':' · 整段审核后放行');
   $('guardrail-privacy').hidden=!(g?.enabled&&(g.input_audio||g.output_audio));
-  $('guardrail-playback-hint').textContent=g?.enabled?'回答生成后先审核，通过后发送文字和声音；等待期间麦克风继续收音。':
+  $('guardrail-playback-hint').textContent=g?.enabled?(g.mode==='reviewed-prefix'?
+   '累计声音与文字通过审核后逐段播放。后续内容继续审核；遇到风险或插话立即停止。麦克风保持收音。':
+   '回答生成后先审核，通过后发送文字和声音；等待期间麦克风继续收音。'):
    '文字和声音逐步到达。生成较慢时会先多缓存一点声音，再连续播放；麦克风保持收音。';
- }catch(e){ready=false;$('connection').textContent='实时接口未连接';$('model').textContent=e.message;}
- $('start').disabled=!ready||permissionPending;$('replay').disabled=!ready||permissionPending||!$('file').files.length;
+ }catch(e){ready=false;$('connection').textContent='实时接口未连接';$('model').textContent=e.message;if(userPage)$('service-message').textContent='连接暂时不可用，正在重试…';}
+ $('start').disabled=!ready||permissionPending||userStarting;if($('replay'))$('replay').disabled=!ready||permissionPending||!$('file').files.length;
+ refreshUserView();
 }
-$('start').onclick=()=>start(false);$('mic-check').onclick=()=>start(true);$('stop').onclick=()=>stop();$('replay').onclick=replay;$('file').onchange=status;
+$('start').onclick=()=>start(false);$('mic-check').onclick=()=>start(true);$('stop').onclick=()=>stop();if($('replay'))$('replay').onclick=replay;if($('file'))$('file').onchange=status;
+if(userPage){
+ const settings=$('settings-dialog'),privacy=$('privacy-dialog');
+ const openSettings=()=>{settings.showModal();};
+ $('settings-top').onclick=openSettings;$('settings-call').onclick=openSettings;
+ $('settings-close').onclick=()=>settings.close();$('settings-done').onclick=()=>settings.close();
+ $('privacy-open').onclick=()=>privacy.showModal();$('privacy-close').onclick=()=>privacy.close();$('privacy-done').onclick=()=>privacy.close();
+ $('mute').onclick=toggleMute;$('captions-toggle').onclick=toggleCaptions;
+ for(const dialog of [settings,privacy])dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});
+ refreshUserView();
+}
 $('mark-problem').onclick=()=>{diagnostic('mark_problem',{context_time:context?.currentTime,source_nodes:sources.size,pending_replies:pendingSpeech.size,ahead_seconds:Math.max(0,playAt-(context?.currentTime||0))});flushDiagnostics();event('已标记声音问题的位置');};
 window.addEventListener('pagehide',()=>{if(diagnosticCall&&diagnosticQueue.length)navigator.sendBeacon(entryUrl('/api/calls/'+diagnosticCall+'/diagnostics'),JSON.stringify({events:diagnosticQueue.slice(-32)}));if(call)navigator.sendBeacon(entryUrl('/api/calls/'+call+'/stop'),'');stream?.getTracks().forEach(t=>t.stop());});
 listMics().catch(()=>{});status();setInterval(status,5000);

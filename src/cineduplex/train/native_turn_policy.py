@@ -9,6 +9,116 @@ import math
 import types
 
 
+class ResponseScopedProcessor:
+    """Apply acoustic repetition rules to this response, preserving model KV."""
+    def __init__(self, processor):
+        self.processor = processor
+        self.start = None
+
+    def __call__(self, ids, scores):
+        if self.start is None:
+            self.start = max(0, ids.shape[1] - 1)
+        return self.processor(ids[:, self.start:], scores)
+
+
+class SpeakingTextVocabulary:
+    """The spoken text channel contains text, EOT and TTS padding only.
+
+    Match the existing offline generation contract. Acoustic/control IDs must
+    not become the next-text embedding used by the speech merge branch.
+    """
+    def __init__(self, eos, pad):
+        self.special = (int(eos), int(pad))
+
+    def __call__(self, ids, scores):
+        keep = scores[:, self.special].clone()
+        scores[:, 151643:] = -float('inf')
+        scores[:, self.special] = keep
+        return scores
+
+
+def install_response_scope(fw):
+    original = getattr(fw, '_cineduplex_unscoped_speaking', fw.init_speaking_processor)
+    fw._cineduplex_unscoped_speaking = original
+    def scoped(end_factor):
+        text, speech = original(end_factor)
+        from cineduplex.train.native_output_contract import TerminalTextProcessor
+        text = type(text)([TerminalTextProcessor(p) if all(hasattr(p,k) for k in
+            ('eos_token_id','has_eos','max_token_length')) else p for p in text])
+        text.append(SpeakingTextVocabulary(fw.eos_token_id, fw.tts_pad_id))
+        return text, type(speech)([ResponseScopedProcessor(p) for p in speech])
+    fw.init_speaking_processor = scoped
+
+
+def install_listening_alignment(session):
+    """Match training and the bundled vLLM runtime's listening channels.
+
+    HF discards sampled listening words, but previously kept those words in
+    the speech merge cache. Feed the same PAD channels that are retained in
+    the conversation. Audio input and native control decisions stay intact.
+    """
+    from lychee_fd.runtime.vllm_generation import SingleTurnGenerationFramework
+    native_stream = session._stream_model
+
+    def aligned(current, **kwargs):
+        if current.listening_state == 'l':
+            text, speech = SingleTurnGenerationFramework.init_listening_pad_processor(current.fw)
+            kwargs = {**kwargs, 'logits_processor': text, 'stoken_logits_processor': speech}
+        return native_stream(**kwargs)
+
+    session._stream_model = types.MethodType(aligned, session)
+
+
+def ground_latest_request(session, request):
+    """Legacy diagnostic helper; deliberately not called by the live wrapper.
+
+    Retained for the earlier unaccepted ASR-grounding experiment only. The
+    native product path does not inject reviewed transcripts into its prefix.
+    """
+    import json
+    import torch
+    key = (request['index'], request['seq_through'])
+    if getattr(session, '_cineduplex_grounded_request', None) == key:
+        return
+    if session.listening_state != 'l':
+        return
+    fw = session.fw
+    old_length = session.system_input_length
+    if not hasattr(session, '_cineduplex_base_instruction'):
+        session._cineduplex_base_instruction = fw.tokenizer.decode(
+            session.prefix_input_ids[0].tolist(), skip_special_tokens=False).removesuffix('<|EOT|>')
+    words = request['text']
+    anchor = ('\nLatest reviewed spoken request: '
+              + json.dumps(words, ensure_ascii=False).replace('<|', '\\u003c|')
+              + '\nAnswer only this request. Earlier tasks ended unless explicitly resumed.') if words else (
+        '\nNo reliably transcribed words. Ask one brief clarification question.')
+    prefix_ids = fw.tokenizer([session._cineduplex_base_instruction + anchor + '<|EOT|>'],
+                              add_special_tokens=False).input_ids[0]
+    prefix = torch.tensor([prefix_ids], dtype=session.generated_input_ids.dtype,
+                          device=session.generated_input_ids.device)
+    suffix = session.generated_input_ids[:, old_length:]
+    if len(prefix_ids) + suffix.shape[1] + 256 >= fw.model.config.text_config.max_position_embeddings:
+        raise ValueError('grounded request exceeds context capacity')
+    mapping = session.stoken_mapping[:, old_length:]
+    delta = len(prefix_ids) - old_length
+    mapping = torch.where(mapping >= 0, mapping + delta, mapping)
+    session.stoken_mapping = torch.cat((mapping.new_full((1, len(prefix_ids)), -1), mapping), 1)
+    session.generated_input_ids = torch.cat((prefix, suffix), 1)
+    if not torch.equal(session.generated_input_ids[:, len(prefix_ids):], suffix):
+        raise ValueError('grounding changed retained token history')
+    session.prefix_input_ids = prefix
+    session.system_input_length = len(prefix_ids)
+    model = getattr(fw.model, '_model', fw.model)
+    conditioning = getattr(model, '_cineduplex_merge_conditioning', None)
+    if conditioning is not None:
+        model._cineduplex_merge_conditioning = torch.cat((
+            conditioning.new_full((1, len(prefix_ids)), -1), conditioning[:, old_length:]), 1)
+    for name in ('past_key_values', 'stoken_past_key_values', 'control_past_key_values', 'merge_past_key_values'):
+        setattr(session, name, None)
+    fw.model._merge_cache_by_past_id.clear()
+    session._cineduplex_grounded_request = key
+
+
 class TurnBoundary:
     """Remember completion before V9 pads or replaces the channel tails.
 
@@ -56,19 +166,24 @@ class TurnBoundary:
                                   'decision': 'cancel_unfinished' if interrupt else 'preserve_completed'}}
 
 
-def install(native_prefix=False, speech_detector=None):
+def install(native_prefix=False, speech_detector=None, turn_control=None):
     from lychee_fd.runtime.hf_v9_realtime import HFRealtimeV9GenerationFramework
     cls = HFRealtimeV9GenerationFramework
     original = getattr(cls, '_cineduplex_native_create', cls.create_incremental_stream_session)
     cls._cineduplex_native_create = original
 
     def create(fw, *args, **kwargs):
+        # One live session owns this model. Do not reuse conditioning from a
+        # previous call, while retaining it across utterances in this call.
+        getattr(fw.model, '_model', fw.model)._cineduplex_merge_conditioning = None
+        install_response_scope(fw)
         activity = None
         if speech_detector is not None:
             from cineduplex.train.speech_activity import StreamingSpeech
             activity = StreamingSpeech(speech_detector)
         answered_utterance = 0
         response_utterance = 0
+        consumed_revision = 0
         # A multiplicative logit factor is not a calibrated probability
         # threshold. With positive SS logits it can reverse native KL/SS
         # ordering before the user finishes their question. Preserve the
@@ -94,7 +209,8 @@ def install(native_prefix=False, speech_detector=None):
             listening_score = listening_cls.__call__
             def wait_for_turn(processor, ids, scores):
                 result = listening_score(processor, ids, scores)
-                if not activity.evidence.can_reply(answered_utterance):
+                if (not activity.evidence.can_reply(answered_utterance)
+                        or (turn_control is not None and not (turn_control.get('caught_up') and turn_control.get('quiet')))):
                     result[:, processor.ss_token_id] = -float('inf')
                     if processor.bc_token_id is not None:
                         result[:, processor.bc_token_id] = -float('inf')
@@ -153,6 +269,7 @@ def install(native_prefix=False, speech_detector=None):
             return result
         speaking_cls.__call__ = confirmed_sl
         session = original(fw, *args, **kwargs)
+        install_listening_alignment(session)
         context_install = getattr(fw.model, '_cineduplex_install_audio_context', None)
         if context_install is not None:
             context_install(session)
@@ -160,7 +277,23 @@ def install(native_prefix=False, speech_detector=None):
         boundary = TurnBoundary(fw.tts_end_id, fw.eos_token_id)
 
         def stream(current, *args, **kwargs):
-            nonlocal answered_utterance, response_utterance
+            nonlocal answered_utterance, response_utterance, consumed_revision
+            # Finish the in-flight 400ms collective, then take the same native
+            # S->L tail transition on every rank before processing backlog.
+            # Preserve all audio and KV history; never answer an older queued
+            # pause while the latest captured question has not been consumed.
+            revision=(turn_control or {}).get('revision',0)
+            if revision > consumed_revision:
+                consumed_revision=revision
+                if current.listening_state in ('s','b'):
+                    previous=current.listening_state.upper()
+                    current.generated_input_ids,current.generated_stoken_ids=fw._apply_s2l_tail_fallback(
+                        current.generated_input_ids,current.generated_stoken_ids)
+                    current.generated_control_ids=fw._set_last_token_safe(current.generated_control_ids,fw.sl_token_id)
+                    current.listening_state='l'
+                    current._set_last_ss_pos(None)
+                    yield {'type':'state_change','from':previous,'to':'L','interrupt':True,
+                           'reason':'ingress_barge_in','chunk':current.next_chunk_pos,'revision':revision}
             audio = args[0] if args else kwargs.get('audio')
             if audio is not None:
                 boundary.input_window(audio)
@@ -174,6 +307,9 @@ def install(native_prefix=False, speech_detector=None):
                            'reply_overdue': activity.evidence.reply_overdue(answered_utterance),
                            'interrupt_playback': bool(started and answered_utterance
                                                       and current.listening_state == 'l')}
+            # Keep the native waveform/semantic stream. Safety ASR is never
+            # injected into the model prefix or used to pause computation;
+            # reviewed output still waits at CallGuardrail's release barrier.
             for event in advance(*args, **kwargs):
                 if (activity is not None and event.get('type') == 'state_change'
                         and event.get('from') == 'L' and event.get('to') in ('S', 'B')):

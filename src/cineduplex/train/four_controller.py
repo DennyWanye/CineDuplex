@@ -20,7 +20,7 @@ MESH={'libnccl.so.2.29.7':'de86e56c99a2c616bfbcb0c65c54380ca9b73abbc6a9583838576
 
 def modules():
     out={p:{'source':'','package':True} for p in ('cineduplex','cineduplex.train','Models')}
-    for name in ('memory_runtime','four_worker','generate','export_memory','export_bulk','decode_generated','codec_config','inference_service','realtime_service','native_turn_policy','audio_embedding_slice','independent_sampling','generation_stream','stage_meter','tensor_parallel'):
+    for name in ('memory_runtime','four_worker','generate','export_memory','export_bulk','native_audio_contract','decode_generated','codec_config','inference_service','realtime_service','native_turn_policy','native_output_contract','native_audio_context','native_quality_session','audio_embedding_slice','independent_sampling','generation_stream','stage_meter','tensor_parallel'):
         out['cineduplex.train.'+name]={'source':(PROJECT/'src/cineduplex/train'/f'{name}.py').read_text(),'package':False}
     out['cineduplex.guardrail']={'source':'','package':True}
     for name in ('aliyun_guardrail','call_guardrail'):

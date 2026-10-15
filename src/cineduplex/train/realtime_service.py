@@ -302,18 +302,11 @@ def bind_incremental_model(model):
 
 def conversation_instruction(language):
     preference={'en':'English','zh':'Chinese','auto':"the user's language"}[language]
-    return ('You are a helpful voice assistant who speaks Chinese and English. '
-        f'Initially prefer {preference}; change language when the user asks. '
-        'Follow the latest spoken request, including topic changes. Stop the previous task '
-        'when asked to do something else. Give the direct answer in ONE short sentence, '
-        'normally at most 30 Chinese characters or 20 English words. Expand only when '
-        'explicitly asked. Do not repeat the question, add a follow-up offer, or narrate '
-        'your voice, acting, reasoning or instructions. If unclear, ask one short question. '
-        'Refuse requests for sexual roleplay, sexual moaning or orgasm sounds, including '
-        'requests framed as acting or imitation. Refuse assistance facilitating violence, '
-        'self-harm, fraud or other serious wrongdoing; offer a brief safe alternative. '
-        'For a sexual sound request say: 抱歉，我不能模仿性行为的声音。 '
-        'Provide only the spoken answer, without stage directions.')
+    return ('You are a helpful assistant who speaks Chinese and English. '
+        f'Initially prefer {preference}; change language when asked. '
+        'Answer only the latest request, briefly. Say when uncertain; ask if unclear. '
+        'Never generate sexual sounds or roleplay, or facilitate violence, self-harm, '
+        'fraud or other serious wrongdoing. Provide only the spoken answer.')
 
 
 def context_budget(session, model):
@@ -626,7 +619,10 @@ class CallArchive:
                 item=self.queue.get()
                 if item is None:break
                 key,payload,size=item;begun=time.monotonic()
-                if key not in self.files:self.files[key]=(self.call.folder/'codec-raw.pcm').open('ab')
+                if key not in self.files:
+                    names={'raw':'codec-raw.pcm','input_review':'input-review.jsonl'}
+                    if key not in names:raise ValueError('unknown archive stream')
+                    self.files[key]=(self.call.folder/names[key]).open('ab' if key=='raw' else 'a')
                 self.files[key].write(payload)
                 elapsed=(time.monotonic()-begun)*1000
                 self.max_write_ms=max(self.max_write_ms,elapsed);self.slow_writes+=elapsed>250
@@ -648,13 +644,14 @@ class CallArchive:
 
 class Call:
     def __init__(self, app, variant, voice='female', probe=False, language='auto'):
-        app.identity.update(codec_mode='native-stream-32-40',codec_chunk_tokens=40,codec_first_chunk_tokens=32,command_transport='fixed-byte-gloo',interrupt_policy='speech-confirmed-barge-in' if getattr(app,'tensor_parallel',None) is not None else 'native-control',tp_branch_layout='all-decoder-branches-sharded')
+        app.identity.update(codec_mode='native-stream-36-40',codec_chunk_tokens=40,codec_first_chunk_tokens=36,command_transport='fixed-byte-gloo',interrupt_policy='ingress-speech-cancel/catch-up-before-reply' if getattr(app,'tensor_parallel',None) is not None else 'native-control',tp_branch_layout=getattr(getattr(app,'tensor_parallel',None),'branch_layout','native-all-branches'))
         app.model._realtime_interrupt_audit=None
         self.last_interrupt_audit=None
         self.app=app; self.id=str(uuid.uuid4()); self.variant=variant;self.voice=voice;self.probe=probe;self.language=language
         self.adapter_scale={'base':0.,'trained':.25,'trained-full':1.,
                             'trained-half':.5,'trained-quarter':.25}[variant]
         self.started=time.time(); self.last_input=self.started; self.last_seq=-1; self.received=0; self.processed=0
+        self.last_processed_at=self.started
         self.input=queue.Queue(maxsize=75); self.synth=queue.Queue(maxsize=100)
         self.closed=threading.Event(); self.condition=threading.Condition(); self.events=deque(maxlen=1024)
         self.seq=0; self.epoch=0; self.end_reason=None; self.input_lock=threading.Lock();self.client_lock=threading.Lock();self.client_seq=-1
@@ -665,6 +662,11 @@ class Call:
         self.input_file=(self.folder/'input.pcm').open('wb')
         self.output_file=(self.folder/'output.pcm').open('wb'); self.file_lock=threading.Lock()
         self.archive=CallArchive(self)
+        # Independent CPU evidence runs on ordered ingress, never behind GPU work.
+        from cineduplex.train.speech_activity import StreamingSpeech
+        detector=getattr(app.model,'_cineduplex_vad_detector',None)
+        self.ingress_speech=StreamingSpeech(detector) if detector is not None else None
+        self.ingress_revision=0; self.ingress_start_seq=-1; self.ingress_end_seq=None; self.grounding_index=0
         self.guardrail=None
         if app.guardrail_client.config.enabled:
             self.guardrail=CallGuardrail(self,app.guardrail_client)
@@ -709,6 +711,21 @@ class Call:
             if self.closed.is_set():
                 raise ValueError('内容未通过安全审核，通话已结束' if self.end_reason=='guardrail_blocked'
                                  else '安全审核未完成，通话已结束')
+            if self.ingress_speech is not None:
+                was_active=self.ingress_speech.evidence.active
+                started=self.ingress_speech.feed(np.frombuffer(pcm,dtype='<i2').astype(np.float32)/32768.)
+                if was_active and not self.ingress_speech.evidence.active:
+                    self.ingress_end_seq=seq
+                if started:
+                    self.ingress_revision+=1
+                    self.ingress_start_seq=seq
+                    self.ingress_end_seq=None
+                    self.epoch+=1
+                    self.emit({'type':'stop_audio','epoch':self.epoch,
+                               'reason':'ingress_confirmed_speech','input_seq':seq,
+                               'ingress_revision':self.ingress_revision})
+                    self.emit({'type':'ingress_speech','input_seq':seq,
+                               'revision':self.ingress_revision,'pending_seconds':(self.received-self.processed)/16000})
             self.input.put((time.time(),pcm));self.last_seq=seq;self.last_input=time.time();self.received+=len(pcm)//2
             return {'accepted':True,'received_seconds':self.received/16000,
                     'pending_seconds':(self.received-self.processed)/16000}
@@ -742,6 +759,15 @@ class Call:
             # every sample/flow step, and retain the resident weights/caches.
             warmed=getattr(codec,'_latency_warm_shapes',set())
             timings=[]
+            first_shape=(self.voice,36,40)
+            if first_shape not in warmed:
+                lookahead=int(codec.flow.pre_lookahead_len)
+                begun=time.monotonic();codec.reset()
+                codec.pcm(codes[:36+lookahead])
+                codec.pcm(codes[36:36+40+lookahead])
+                codec.pcm(codes[76:77],last=True)
+                timings.append({'first_codes':36,'wall_ms':round((time.monotonic()-begun)*1000,1)})
+                warmed.add(first_shape);codec._latency_warm_shapes=warmed
             if self.voice not in warmed:
                 lookahead=int(codec.flow.pre_lookahead_len)
                 for final_count in range(1,44):
@@ -794,9 +820,10 @@ class Call:
             synth=threading.Thread(target=self.synthesis,daemon=True);synth.start()
             meter=StageMeter(self.app.model)
             context_warned=False
+            generation_epoch=self.epoch
             with torch.inference_mode():
                 while not self.closed.is_set():
-                    if time.time()-self.last_input>15 and self.input.empty():self.stop('input_timeout');break
+                    if time.time()-max(self.last_input,self.last_processed_at)>15 and self.input.empty():self.stop('input_timeout');break
                     used,limit,remaining=context_budget(session,self.app.model)
                     if remaining<fw.control_token_chunk_size*2:
                         self.stop('context_limit');break
@@ -807,7 +834,29 @@ class Call:
                     try:sent,pcm=self.input.get(timeout=.25)
                     except queue.Empty:continue
                     ingress_begun=time.monotonic()
-                    if tp is not None:tp.audio(pcm)
+                    # A fixed command snapshot is broadcast to all ranks. No GPU
+                    # state is changed by the ingress HTTP thread.
+                    with self.input_lock:
+                        evidence=self.ingress_speech.evidence if self.ingress_speech is not None else None
+                        turn_control={'revision':self.ingress_revision,
+                            'caught_up':self.processed+len(pcm)//2 >= self.received,
+                            'quiet':bool(evidence and not evidence.active and evidence.quiet_frames>=20)}
+                        if self.guardrail is not None and self.guardrail.config.input_audio:
+                            request = self.guardrail.approved_input(self.ingress_start_seq,self.ingress_end_seq)
+                            if request is not None:
+                                if request['index'] != self.grounding_index:
+                                    self.archive.write('input_review',json.dumps(request,ensure_ascii=False)+'\n')
+                                    self.grounding_index=request['index']
+                                    import hashlib
+                                    self.emit({'type':'input_review_receipt','input_index':request['index'],
+                                        'seq_through':request['seq_through'],
+                                        'transcript_sha256':hashlib.sha256(request['text'].encode()).hexdigest(),
+                                        'source':'safety_review_only','has_text':bool(request['text'])})
+                                # ASR belongs to the release safety barrier and
+                                # diagnostics. Native generation receives only
+                                # the waveform and ingress control, not words.
+                        window_epoch=self.epoch
+                    if tp is not None:tp.audio(pcm,turn_control=turn_control)
                     dispatch_ms=(time.monotonic()-ingress_begun)*1000
                     audio=np.frombuffer(pcm,dtype='<i2').astype(np.float32)/32768.
                     begun=time.monotonic()
@@ -823,7 +872,7 @@ class Call:
                             # With whole-answer review, generation may already
                             # be idle while its approved audio is still playing.
                             # A new utterance must also stop that playback.
-                            if raw.get('interrupt_playback'):
+                            if raw.get('interrupt_playback') and self.ingress_speech is None:
                                 self.epoch+=1
                                 self.emit({'type':'stop_audio','epoch':self.epoch,
                                            'reason':'confirmed_user_speech'})
@@ -834,9 +883,13 @@ class Call:
                         if raw['type']=='speaking_done':
                             self.emit({'type':'generation_end','reason':raw.get('reason'),
                                        'chunk':raw.get('chunk')})
+                        if raw['type']=='state_change' and raw.get('from')=='L' and raw.get('to') in ('S','B'):
+                            generation_epoch=window_epoch
                         for event in decoder.feed(raw):
                             kind=event['type']
-                            if (kind=='state_change' and event['to']=='L'
+                            if kind=='state_change' and event.get('from')=='L' and event.get('to') in ('S','B'):
+                                generation_epoch=window_epoch
+                            if (self.ingress_speech is None and kind=='state_change' and event['to']=='L'
                                     and event['from'] in ('S','B') and event.get('interrupt')):
                                 # Normal completion also returns to listening.
                                 # Preserve its tail; only an explicit native
@@ -844,9 +897,9 @@ class Call:
                                 self.epoch+=1
                                 self.emit({**event,'type':'stop_audio','epoch':self.epoch})
                             if kind in ('event_start','audio_chunk','event_end'):
-                                self.synth.put((self.epoch,event),timeout=2)
+                                self.synth.put((generation_epoch,event),timeout=2)
                             if kind in ('state_change','control_decision','text_delta','event_start','event_end'):
-                                self.emit({k:v for k,v in event.items() if k!='stoken_ids'})
+                                self.emit({**{k:v for k,v in event.items() if k!='stoken_ids'},'epoch':generation_epoch})
                                 if kind=='control_decision' and event.get('state')=='s':
                                     audit=getattr(self.app.model,'_realtime_interrupt_audit',None)
                                     if audit:self.emit({'type':'interrupt_control','chunk':event.get('chunk'),**audit})
@@ -859,6 +912,9 @@ class Call:
                         self.last_interrupt_audit=audit
                     if tp is not None:tp.finish_window()
                     self.processed+=len(audio)
+                    # A queue that just drained is progress, not an idle call.
+                    # Leave the existing bounded grace for synthesis/review.
+                    self.last_processed_at=time.time()
                     self.emit({'type':'metrics','received_seconds':self.received/16000,
                         'processed_seconds':self.processed/16000,'pending_seconds':(self.received-self.processed)/16000,
                         'compute_ms':round((time.monotonic()-begun)*1000,1),
@@ -916,14 +972,17 @@ class Call:
         codec=self.app.codec;tokens=[];all_codes=[];epoch=-1;event_id=None;initialized=False;emitted=0
         try:
             codec.select_voice(self.app.root,self.voice)
-            lookahead=int(codec.flow.pre_lookahead_len);block=32
+            # Native vocoder retains a 160ms overlap. 36 codes produce 1.28s,
+            # enough for the unchanged 1.2s audit window in the first block.
+            # 32 codes produced only 1.12s, forcing another 40-code wait.
+            lookahead=int(codec.flow.pre_lookahead_len);block=36
             def publish(codes,last=False):
                 nonlocal emitted
                 begun=time.monotonic();pcm=codec.pcm(codes,last=last)
                 self.output(pcm,epoch,event_id,final_chunk=last,advance_seconds=(len(codes)-lookahead)*.04);emitted+=len(pcm)/48000
                 self.emit({'type':'codec_metrics','event_id':event_id,'epoch':epoch,
                     'compute_ms':round((time.monotonic()-begun)*1000,1),
-                    'audio_seconds':len(pcm)/48000,'mode':'stream-32-40','voice':self.voice,
+                    'audio_seconds':len(pcm)/48000,'mode':'stream-36-40','voice':self.voice,
                     'noise_reduction':'off-quality-baseline','codes':len(codes),'final_chunk':last,
                     'synthesis_queue':self.synth.qsize()})
             while not self.closed.is_set() or not self.synth.empty():
@@ -931,7 +990,7 @@ class Call:
                 except queue.Empty:continue
                 if self.closed.is_set() or current!=self.epoch:continue
                 if current!=epoch or event['type']=='event_start':
-                    tokens=[];all_codes=[];emitted=0;block=32;epoch=current;initialized=True;codec.reset()
+                    tokens=[];all_codes=[];emitted=0;block=36;epoch=current;initialized=True;codec.reset()
                     event_id=event.get('event_id',str(uuid.uuid4()))
                     self.emit({'type':'audio_start','event_id':event_id,'epoch':epoch,'voice':self.voice,
                                'streaming':True,'buffer_seconds':.8})
@@ -1005,7 +1064,8 @@ class Application:
                 raise RuntimeError('模型服务正在恢复，暂时不能开始通话')
             if self.active is not None:raise RuntimeError('已有通话正在使用模型，请稍后再试')
             self.identity['decode_precision']=self.model._realtime_quantization['precision']
-            self.identity['playback_mode']='stream-measured-adaptive-buffer'
+            self.identity['playback_mode']=('reviewed-prefix-adaptive-buffer'
+                if self.guardrail_client.config.output_mode == 'reviewed-prefix' else 'stream-measured-adaptive-buffer')
             self.identity['language_instruction']='initial-preference-user-can-switch'
             self.identity['text_projection']='original-bf16-prefill-and-decode'
             self.identity['diagnostics_schema']=2
@@ -1014,8 +1074,8 @@ class Application:
             self.identity['generation_loop']=getattr(self.model,'_cineduplex_generation_loop','native-channels-incremental')
             self.identity['session_limit']='context-capacity-with-warning'
             self.identity['context_limit']=int(self.model.config.text_config.max_position_embeddings)
-            self.identity['codec_mode']='native-stream-32-40'
-            self.identity['codec_chunk_tokens']=40;self.identity['codec_first_chunk_tokens']=32
+            self.identity['codec_mode']='native-stream-36-40'
+            self.identity['codec_chunk_tokens']=40;self.identity['codec_first_chunk_tokens']=36
             self.identity['voice_presets']=['female','male']
             self.identity['output_noise_reduction']='off-quality-baseline'
             self.identity['trained_adapter_scale']=.25

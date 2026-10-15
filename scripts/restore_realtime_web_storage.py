@@ -20,7 +20,10 @@ def main():
   raise ValueError('formal web identity differs')
  n.run('if docker inspect '+BACKUP+' >/dev/null 2>&1; then exit 1; fi',timeout=10)
  pins={}
- for file in ('realtime_server.py','realtime.html','realtime.js','capture.worklet.js'):
+ # The production user page also needs its voice/message styles, controller
+ # and mascot. Preserve the complete existing page during a storage recovery.
+ for file in ('realtime_server.py','realtime.html','realtime.js','capture.worklet.js',
+              'voice.css','messages.css','messages.js','xiaocheng.png','realtime-lab.html'):
   data=n.read(OLD+'/'+WEB+'/'+file,timeout=15)
   pins[file]=n.put(NEW+'/'+WEB+'/'+file,data)
  n.put(NEW+'/FORMAL-STORAGE-RESTORE-REQUEST.json',json.dumps({'at':time.time(),'status':status,'pins':pins}).encode())
@@ -38,10 +41,11 @@ def main():
    except RuntimeError:pass
    time.sleep(.5)
   else:raise RuntimeError('restored proxy unavailable')
-  served=command(['curl','-fsS','--max-time','3','http://127.0.0.1:18089/realtime.js'])
-  if hashlib.sha256(served).hexdigest()!=pins['realtime.js']['sha256']:raise RuntimeError('formal frontend changed')
+  for file in ('realtime.js','voice.css','messages.css','messages.js','xiaocheng.png'):
+   served=command(['curl','-fsS','--max-time','5','http://127.0.0.1:18089/'+file])
+   if hashlib.sha256(served).hexdigest()!=pins[file]['sha256']:raise RuntimeError('formal frontend changed: '+file)
  except Exception:
   n.run('if docker inspect '+NAME+' >/dev/null 2>&1; then docker stop '+NAME+'; docker rename '+NAME+' '+NAME+'-restore-failed; fi',timeout=40)
   command(['docker','rename',BACKUP,NAME]);command(['docker','start',NAME]);raise
- print(n.put(NEW+'/FORMAL-STORAGE-RESTORED.json',json.dumps({'at':time.time(),'container':cid,'status':verified,'web_pins':pins,'backup':BACKUP,'frontend_changed':False}).encode()))
+ print(n.put(NEW+'/FORMAL-STORAGE-RESTORED.json',json.dumps({'at':time.time(),'container':cid,'status':verified,'web_pins':pins,'backup':BACKUP,'frontend_changed':False,'new_quality_release':False}).encode()))
 if __name__=='__main__':main()

@@ -4,6 +4,16 @@ class Capture extends AudioWorkletProcessor {
   constructor(){
     super();this.half=31;this.step=sampleRate/16000;
     this.buffer=Array(this.half).fill(0);this.pos=this.half;this.samples=[];this.meter=0;
+    this.port.onmessage=e=>{
+      if(e.data?.type!=='flush')return;
+      if(this.samples.length){
+        const n=this.samples.length, bytes=new ArrayBuffer(12800), view=new DataView(bytes);
+        this.samples.forEach((x,i)=>view.setInt16(i*2,x,true));
+        this.port.postMessage({pcm:bytes,rms:Math.sqrt(this.meter/n),validSamples:n},[bytes]);
+        this.samples=[];this.meter=0;
+      }
+      this.port.postMessage({flushed:true});
+    };
     this.filters=[];
     const cutoff=Math.min(.45,7200/sampleRate);
     for(let phase=0;phase<256;phase++){

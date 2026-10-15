@@ -1,0 +1,175 @@
+{
+  "schema": "cineduplex-voice-investigation-evidence-v1",
+  "status": "PAUSED_BY_USER",
+  "report_date": "2026-10-15",
+  "quality_accepted": false,
+  "precise_acoustic_root_cause": "UNKNOWN",
+  "precision": "bf16",
+  "quantization": "none",
+  "publication_scope": "metadata only; private recordings, transcripts, raw receipts, credentials, deployment configs and weights excluded",
+  "private_archive_relative_path": "output/voice-investigation-pause-20261015",
+  "verification_scope": "hashes recorded during previous NAS archive; no model, call, cloud or regression tests performed for this publication",
+  "artifacts": [
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/R222-SERVICE-RESTORED-AUDIT.json",
+      "label": "原服务恢复总核对",
+      "present": true,
+      "bytes": 1578,
+      "sha256": "d8beaf0d28f116c660b8469bd387108603eff13cc028c162141e97d4bbf32bb7"
+    },
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/R222-NORMAL-CALL.json",
+      "label": "1.6秒数字静音正常调用，不是回答质量测试",
+      "present": true,
+      "bytes": 23433,
+      "sha256": "0473379ab32c22845071595c510568cba853e154ae5266d28b92e7bc3b8435a7"
+    },
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/GUARDRAIL-RESTORED.json",
+      "label": "原防护与codec暖机",
+      "present": true,
+      "bytes": 733,
+      "sha256": "e4743456c6237b44bda5ccd06ad825e54fa2dec9edac95ed62ca0fc312d01905"
+    },
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/FORMAL-STORAGE-RESTORED.json",
+      "label": "原Web63资产保留与存储重绑",
+      "present": true,
+      "bytes": 4291,
+      "sha256": "efe81f47328ba1eb757adf4fb409354f399fb665d95f9dd9f66242ec45ba1fae"
+    },
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/R222-PUBLIC-STATUS.json",
+      "label": "上轮公网状态快照，不是暂停时实时状态",
+      "present": true,
+      "bytes": 2235,
+      "sha256": "a4bbe5d99d3f3abca9afb171866d5d3a0e52c05e2fa5871d37110201dbe0509d"
+    },
+    {
+      "path": "output/realtime-tp4-20261015-native-recovery-v6/N221-FAILURE-AND-RECOVERY.json",
+      "label": "新增诊断同步故障与恢复记录",
+      "present": true,
+      "bytes": 787,
+      "sha256": "c33c0d082d659decb1c81518aea7b15ed8dd2314fe7ddfc76eaa2a7a9230f1b5"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/QUALITY221-TERMINAL-CONTINUOUS.json",
+      "label": "失败优化原始回执，保留失败",
+      "present": true,
+      "bytes": 49253,
+      "sha256": "a3dab99458d88e86694465e58bdf1b92632119d7b458b1dc190c915a2d21d754"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/QUALITY220-MINIMAL-CONTINUOUS.json",
+      "label": "原始连续通话回放，原harness错误保留",
+      "present": true,
+      "bytes": 1322213,
+      "sha256": "b5e4ddf19f5c348fcba4a0912de9f57e2ec3e6278e7dab7b043d6a7fe8a4428b"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/NATIVE220-CONTINUOUS-AUDIT.json",
+      "label": "确证插话取消的独立更正",
+      "present": true,
+      "bytes": 2109,
+      "sha256": "0865d8047237c22b1ba574973483a01170b192cef3cb64b9d091d3d094a667aa"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/QUALITY219-CONTINUOUS-MORNING.json",
+      "label": "较慢参考路径连续通话回放",
+      "present": true,
+      "bytes": 1328202,
+      "sha256": "eabd24d397e7d44bb7987f83a615a34415e176eeba462aa9d1df2cbfc431a5b0"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/QUALITY218-UPSTREAM-TWO-TURNS.json",
+      "label": "默认系统前缀对照未修复",
+      "present": true,
+      "bytes": 704922,
+      "sha256": "c774a02b346fb4e8f7be039e06babf041b91d4a568ba8dc9519439164633d30a"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/QUALITY217-CONTINUOUS-CONTEXT.json",
+      "label": "持续重算声音上下文对照未修复",
+      "present": true,
+      "bytes": 216349,
+      "sha256": "3df4164ac7aa1f20a1238f67c501d7c178330206bc2dd257a4aba4aec1d6b247"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/NATIVE214-HISTORY-CAUSE.json",
+      "label": "实际token历史与缓存位置观察，非全KV张量证明",
+      "present": true,
+      "bytes": 90856,
+      "sha256": "68f0a09272c5ebb546e965906fd2a31d76cc1368f7a6c7890886e6726deb10cf"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v5/NATIVE207-OFFICIAL208-CLOUD209-COMPARISON.json",
+      "label": "同权重官方兼容后端与原路径对照",
+      "present": true,
+      "bytes": 5572,
+      "sha256": "2c0166a648025adfbbe5a92c9bd749f2b4c224217a16e9522710a3e091177dde"
+    },
+    {
+      "path": "output/native-audio-diagnosis-20261014-215/RESULT.json",
+      "label": "归档音频与实际API放行字节一致；独立转写",
+      "present": true,
+      "bytes": 4814,
+      "sha256": "e554db816047571c3d5fb5813ad1bc4c28f7204172ebb9ecbee100a83ac3107e"
+    },
+    {
+      "path": "output/native-audio-diagnosis-20261014-217/RESULT.json",
+      "label": "持续上下文声音独立转写",
+      "present": true,
+      "bytes": 10028,
+      "sha256": "92e7f34c4870bea2b4f03f13397d79669e69a47e5a540efdbf03b1b99bed5494"
+    },
+    {
+      "path": "output/native-audio-diagnosis-20261015-218/RESULT.json",
+      "label": "默认前缀声音独立转写",
+      "present": true,
+      "bytes": 4389,
+      "sha256": "18a07b52f13e250c2725213a2f563d3dace23f17e60e7387a78ee0e961f6616d"
+    },
+    {
+      "path": "output/native-audio-diagnosis-20261015-223/ROOT-CAUSE-SCOPE.json",
+      "label": "同一回答的内部文字、公开字幕、问题归属",
+      "present": true,
+      "bytes": 8452,
+      "sha256": "e5125d983f15ca5d458cc6136ea4f3808d819dee597346323cbc076d79a51956"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v3/CLOUD198-CHRONOLOGY-CAUSE.json",
+      "label": "云审核分段倒序的直接因果证据",
+      "present": true,
+      "bytes": 2080,
+      "sha256": "b3f244da33579dca90fa53596eaf8079d3538782b10098fa980994f2c65ad8d3"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v3/NATIVE200-REAL-FOUR-TURN-AUDIT.json",
+      "label": "分段时间排序修复后的四轮安全回放",
+      "present": true,
+      "bytes": 3268,
+      "sha256": "ffe271e7c358847cffc5f5ae01daa0688dcafedbe86c87f8ccb2bc407a5b7428"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v3/NATIVE-FIRST-ERROR-20261014-1335.json",
+      "label": "首个实体文字错误的定位范围",
+      "present": true,
+      "bytes": 7029,
+      "sha256": "43a19b63e8a3bf93bea3387e48495ef7dccf2acea5e007a3776960bf50bbba01"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v3/SMALL-BATCH-ACOUSTIC-20261014-150.json",
+      "label": "小批对齐与声学LoRA核对",
+      "present": true,
+      "bytes": 5121,
+      "sha256": "6b050eb63b9a8f50f1df116e7aa819390e9388b6c46b2d9ef412659b3b8045f7"
+    },
+    {
+      "path": "output/realtime-tp4-20261014-native-recovery-v3/ACOUSTIC-WINDOW-COMPARISON-20261014-155.json",
+      "label": "8步声学微调对照，未改善质量",
+      "present": true,
+      "bytes": 5095,
+      "sha256": "8e261ec8ebb4e3662acf3b8f70ea95506735a3360550eb2d1bdc32f4822068d0"
+    }
+  ]
+}

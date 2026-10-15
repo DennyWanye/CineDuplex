@@ -62,3 +62,7 @@ vendor/lychee-fd-network-incomplete/
 /src/cineduplex/cluster/*
 !/src/cineduplex/cluster/__init__.py
 !/src/cineduplex/cluster/guard.py
+
+# Public paused-investigation summary and sanitized metadata only.
+!/docs/NATIVE_VOICE_INVESTIGATION_20261015.zh-CN.md
+!/docs/NATIVE_VOICE_EVIDENCE_20261015.json

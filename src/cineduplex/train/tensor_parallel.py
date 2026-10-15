@@ -25,10 +25,10 @@ import torch.distributed as dist
 
 LEADER=3
 TP_GROUP=None
-CALL_RUNTIME_NAME='call-runtime-v47.py'
-CALL_RUNTIME_SHA='51c778056be83e4cbdc228012c47eee571876a70976f17dd25735448638d3d71'
-GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v7.json'
-GUARDRAIL_BUNDLE_SHA='bb68f51c770254933564197f8a17b84052bdd32a3624ea5d877509f4001d914b'
+CALL_RUNTIME_NAME='call-runtime-v61.py'
+CALL_RUNTIME_SHA='4e2dceb8d5e71fe671b01727eafff9838e53d2ee985a778998c00ad7334f9bdb'
+GUARDRAIL_BUNDLE_NAME='guardrail-bundle-v20.json'
+GUARDRAIL_BUNDLE_SHA='4678d37d5d8d8651e6bccc89749ea8348bbb17af8ba0dc21299b71c0dce405b6'
 
 def install_call_runtime(root):
     path=Path(root)/CALL_RUNTIME_NAME;source=path.read_bytes()
@@ -68,15 +68,20 @@ def install_call_runtime(root):
                 client=getattr(app,'guardrail_client',None)
             if client is None:raise RuntimeError('安全护栏凭据尚未就绪，请稍后再连接')
             from cineduplex.guardrail.aliyun_guardrail import Config,AliyunGuardrail
-            if client.__class__ is not AliyunGuardrail:
-                client=AliyunGuardrail(Config(**vars(client.config)))
+            if client.__class__ is not AliyunGuardrail or client.config.output_mode != 'reviewed-prefix':
+                client=AliyunGuardrail(Config(**{**vars(client.config), 'output_mode': 'reviewed-prefix'}))
+                client.config.validate()
                 app.tensor_parallel.guardrail_client=client
             if app.identity.get('guardrail',{}).get('enabled') and not client.config.enabled:
                 raise RuntimeError('安全护栏不得在运行更新时降级为关闭')
             app.guardrail_client=client
             app.identity['guardrail']=client.config.status()
             app.identity['guardrail_runtime_sha256']=CALL_RUNTIME_SHA
-        return previous(app,*args,**kwargs)
+            app.identity['guardrail_bundle_sha256']=GUARDRAIL_BUNDLE_SHA
+        call=previous(app,*args,**kwargs)
+        app.identity['playback_mode']=('reviewed-prefix-adaptive-buffer'
+            if app.guardrail_client.config.output_mode == 'reviewed-prefix' else 'stream-measured-adaptive-buffer')
+        return call
     runtime.Application.start=guarded_start
 
 # Existing Coordinators execute a pinned update module before replacing their
@@ -199,12 +204,14 @@ class PackedColumns:
 
 
 class Coordinator:
+    branch_layout='main-control-tp4/speech-merge-native-bf16'
     command_transport="fixed-byte-nccl-active/gloo-idle"
     def __init__(self,control,root,kernel_sha256):
         self.control=control;self.root=root;self.installed=[];self.rank=dist.get_rank()
         self.kernels=None;self.kernel_sha256=kernel_sha256
 
     def command(self,value=None):
+        if not hasattr(self,'turn_control'):self.turn_control={}
         # Resident peers remain inside their original bound peer_loop. Hook
         # its dynamically dispatched command boundary, not a future loop.
         if self.rank!=LEADER:self.finish_window()
@@ -248,7 +255,11 @@ class Coordinator:
                 item=json.loads(bytes(self.command_storage[8:8+header_len]))
                 if item.pop('_pcm_bytes')!=pcm_len:raise ValueError('TP PCM frame size mismatch')
                 if pcm_len:item['pcm']=bytes(self.command_storage[8+header_len:8+header_len+pcm_len])
-                if item['kind']=='start':self.command_cuda_active=True
+                if item['kind']=='audio':
+                    self.turn_control.clear();self.turn_control.update(item.get('turn_control',{}))
+                if item['kind']=='start':
+                    self.command_cuda_active=True
+                    self.turn_control.clear()
                 elif item['kind']=='stop':self.command_cuda_active=False
                 if self.rank!=LEADER:
                     if item['kind']=='start':self.profile_id=item.get('profile_id')
@@ -372,43 +383,44 @@ class Coordinator:
         install_call_runtime(self.root)
         # Update the native state-machine adapter on all admitted ranks,
         # including existing framework objects, without reloading weights.
-        policy_path=self.root/'native-turn-policy-v10.py'
+        policy_path=self.root/'native-turn-policy-v21.py'
         policy_source=policy_path.read_bytes()
-        policy_sha='a4a01af5f2d4be17eea7892eba9b76febdbd792d0a32a68583d99c354edda6c0'
+        policy_sha='04a29d0e944cbe12545207d894ad49df3744650a7095ecd625c1c63ea0c91640'
         if hashlib.sha256(policy_source).hexdigest()!=policy_sha:
             raise ValueError('native turn policy source identity')
         policy=types.ModuleType('cineduplex_native_turn_policy')
         exec(compile(policy_source,str(policy_path),'exec'),policy.__dict__)
         import sys
-        activity_source=(self.root/'speech-activity-v2.py').read_bytes()
-        activity_sha='df55247ef5b770d60cefb417cc6f27253a09c7b3ebb969fc8632d44609d408d9'
+        activity_source=(self.root/'speech-activity-v3.py').read_bytes()
+        activity_sha='0fde24cf603042012d679a70db696a2a214b907f5605d7c3b7cc3ebf4260a516'
         if hashlib.sha256(activity_source).hexdigest()!=activity_sha:
             raise ValueError('speech activity source identity')
         activity=types.ModuleType('cineduplex.train.speech_activity')
-        exec(compile(activity_source,str(self.root/'speech-activity-v2.py'),'exec'),activity.__dict__)
+        exec(compile(activity_source,str(self.root/'speech-activity-v3.py'),'exec'),activity.__dict__)
         sys.modules[activity.__name__]=activity
         if getattr(model,'_cineduplex_vad_sha',None)!=activity.MODEL_SHA256:
             model._cineduplex_vad_detector=activity.load_detector(self.root/'silero-vad-v1.onnx')
             model._cineduplex_vad_sha=activity.MODEL_SHA256
-        policy.install(native_prefix=False,speech_detector=model._cineduplex_vad_detector)
-        sampling_sha='6926cdf5f2804de298dce215f0f30bb57db081b3122d9f2397a4433f89734178'
+        if not hasattr(self,'turn_control'):self.turn_control={}
+        policy.install(native_prefix=False,speech_detector=model._cineduplex_vad_detector,turn_control=self.turn_control)
+        sampling_sha='f8731b5a5bf922a78246b6dc303b7004cf4231da83622cba43a4624d4dc6e397'
         if getattr(model,'_cineduplex_sampling_sha',None)!=sampling_sha:
-            path=self.root/'independent-sampling-v2.py';source=path.read_bytes()
+            path=self.root/'independent-sampling-v8.py';source=path.read_bytes()
             if hashlib.sha256(source).hexdigest()!=sampling_sha:raise ValueError('sampling source identity')
             sampling_module=types.ModuleType('cineduplex_independent_sampling')
             exec(compile(source,str(path),'exec'),sampling_module.__dict__)
             model._tp_local_sample,model._cineduplex_sampling_identity=sampling_module.install(model)
             model._cineduplex_sampling_sha=sampling_sha
-        stream_sha='7bc18ddd2df5d89f1f3c1d1759fb94117743d4208e0400b67c3cda0b4e900207'
+        stream_sha='9b7377a260b203717b790d8907f1210b279b0539ffdaa9fd116371405a6b4591'
         if getattr(model,'_cineduplex_stream_sha',None)!=stream_sha:
-            path=self.root/'generation-stream-v4.py';source=path.read_bytes()
+            path=self.root/'generation-stream-v7.py';source=path.read_bytes()
             if hashlib.sha256(source).hexdigest()!=stream_sha:raise ValueError('stream source identity')
             module=types.ModuleType('cineduplex_native_incremental_stream')
             exec(compile(source,str(path),'exec'),module.__dict__)
             module.install(model);model._cineduplex_stream_sha=stream_sha
-        stage_sha='eec9a815faae4c0ea1aafbde861782496bf19478e9d22e22900e7eaa67636123'
+        stage_sha='ff35b6e091a7c3b03f1ca79dcf1da6992b6d6555823753bcf30e9f01b7a955cb'
         if self.rank==LEADER:
-            path=self.root/'stage-meter-v3.py';source=path.read_bytes()
+            path=self.root/'stage-meter-v4.py';source=path.read_bytes()
             if hashlib.sha256(source).hexdigest()!=stage_sha:raise ValueError('stage meter source identity')
             module=types.ModuleType('cineduplex_sparse_stage_meter')
             exec(compile(source,str(path),'exec'),module.__dict__)
@@ -486,6 +498,14 @@ class Coordinator:
             leaf=name.rsplit('.',1)[-1]
             axis=1 if leaf in ('o_proj','down_proj') else 0
             candidates.append((name,layer,weight,bias,axis))
+        # Keep native full BF16 speech/merge arithmetic for voice quality.
+        # Main and control retain the admitted TP layout and sampling bridge.
+        reference=[x for x in candidates if x[0].startswith(('stoken_model.','merge_model.'))]
+        for _,layer,weight,bias,_ in reference:
+            for attr in ('_cineduplex_tp_operator','_cineduplex_tp_group','_cineduplex_tp_index'):
+                if hasattr(layer,attr):delattr(layer,attr)
+            layer.forward=types.MethodType(lambda m,x,w=weight,b=bias:torch.nn.functional.linear(x,w,b),layer)
+        candidates=[x for x in candidates if not x[0].startswith(('stoken_model.','merge_model.'))]
         install_key=tuple((name,id(weight),id(bias),axis) for name,_,weight,bias,axis in candidates)
         if getattr(self,'install_key',None)==install_key:
             # prepare_adapter restores LoRA forwards each call. Rebind the
@@ -632,7 +652,7 @@ class Coordinator:
         try:
             # Exercise the deferred pair sentinel on all actual ranks before
             # admitting a call. No negative token can reach the next step.
-            stream_path=self.root/'generation-stream-v4.py'
+            stream_path=self.root/'generation-stream-v7.py'
             stream_module=types.ModuleType('cineduplex_stream_sentinel_probe')
             exec(compile(stream_path.read_bytes(),str(stream_path),'exec'),stream_module.__dict__)
             probe_text=torch.tensor([[2]],device='cuda')
@@ -678,8 +698,8 @@ class Coordinator:
                 'model_stream_priority':self.model_stream.priority,'collective_priority':'high',
                 'bf16_reduced_precision_reduction':torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
                 'layers':len(candidates),'packed_groups':len(groups),'kernel_sha256':self.active_kernel_sha256,
-                'qualified_shapes':errors,'decoder_checks':decoder_errors,'kv_layout':'all-branches-local',
-                'intermediate_layout':'all-branches-local','prefill_projection':'native-full-bf16','at':time.time()}
+                'qualified_shapes':errors,'decoder_checks':decoder_errors,'kv_layout':'main-control-local/speech-merge-full-bf16',
+                'intermediate_layout':'main-control-local/speech-merge-full-bf16','prefill_projection':'native-full-bf16','at':time.time()}
         self.install_key=install_key;self.qualification=record
         self.keep_idle_channel_alive()
         return record
@@ -693,10 +713,10 @@ class Coordinator:
             self.in_call=True
             self.profile_id=profile_id
             self.command({'kind':'start','voice':voice,'language':language,'scale':scale,'profile_id':profile_id})
-    def audio(self,pcm):
+    def audio(self,pcm,turn_control=None):
         profile=getattr(self,'rank_profile',None)
         if profile is not None:profile.begin(self.profile_seq)
-        self.command({'kind':'audio','pcm':pcm,'profile_seq':getattr(self,'profile_seq',0)})
+        self.command({'kind':'audio','pcm':pcm,'turn_control':turn_control or {},'profile_seq':getattr(self,'profile_seq',0)})
         self.profile_seq=getattr(self,'profile_seq',0)+1
     def finish_window(self):
         if getattr(self,'rank_profile',None) is not None:self.rank_profile.finish()

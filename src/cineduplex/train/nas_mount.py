@@ -66,7 +66,14 @@ try:
   time.sleep(.5)
  if not ready:raise RuntimeError('NAS mount readiness failed')
  print('MOUNT_READY',flush=True)
- sys.stdin.read()
+ disconnected=threading.Event()
+ def watch_owner():
+  try:sys.stdin.read()
+  finally:disconnected.set()
+ threading.Thread(target=watch_owner,daemon=True).start()
+ while not disconnected.wait(.5):
+  if client.poll() is not None or server.poll() is not None:
+   raise RuntimeError('NAS mount transport exited')
 finally:
  if ready:
   result=subprocess.run(ssh+['fusermount3 -u "$HOME/cineduplex-work/'+c['payload'].get('mount_name','nas-training')+'"'],capture_output=True,timeout=30)

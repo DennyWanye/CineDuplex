@@ -8,6 +8,7 @@ import sys
 import types
 import wave
 from cineduplex.train.memory_runtime import Store
+from cineduplex.train.native_audio_contract import native_audio_contract
 
 
 def run(config):
@@ -46,7 +47,8 @@ def run(config):
         ids=tokenizer.encode(token,add_special_tokens=False)
         if len(ids)!=1: raise ValueError('non-atomic control token')
         args[key]=ids[0]
-    args.update(data_path='frozen-input',window_second=24,align_audio_input=True,max_data_length=10000,
+    audio_contract = native_audio_contract(published)
+    args.update(data_path='frozen-input',window_second=audio_contract['window_second'],align_audio_input=True,max_data_length=10000,
                 enable_user_bc=False,enable_ai_bc=True,ai_bc_lead_silence_sec=0.,ai_bc_min_gap_sec=5.,ai_bc_max_num=1)
     files = config['input_files']; descriptors=[]; input_count=0
     for split in ('train','eval'):
@@ -76,7 +78,8 @@ def run(config):
         store.json(config['run_prefix']+f'/{split}-features.json',{'rows':split_rows,'configuration':args})
         if split=='train': descriptors=split_rows
         input_count+=len(rows)
-    index={'format':'cineduplex-sharded-features-v1','rows':descriptors,'quality_approved':False}
+    index={'format':'cineduplex-sharded-features-v1','rows':descriptors,'quality_approved':False,
+           'native_audio_contract':audio_contract}
     receipt=store.json(config['run_prefix']+'/batches-index.json',index)
     receipt.update(rows=len(descriptors),scenes=[r['scene_id'] for r in descriptors],input_count=input_count,
                    input_files=files,quality_approved=False,sharded=True,

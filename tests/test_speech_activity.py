@@ -11,7 +11,7 @@ class SpeechEvidenceTests(unittest.TestCase):
     def test_noise_spikes_cannot_start_or_interrupt_a_turn(self):
         e = SpeechEvidence()
         for _ in range(20):
-            self.frames(e, .9, 2)
+            self.frames(e, .9, 7)
             self.frames(e, .05, 4)
         self.assertEqual(e.utterance, 0)
         self.assertFalse(e.can_reply(0))
@@ -34,7 +34,7 @@ class SpeechEvidenceTests(unittest.TestCase):
         self.frames(e, .9, 20)
         self.assertFalse(e.can_interrupt(1))
         self.frames(e, .05, 10)
-        self.frames(e, .9, 3)
+        self.frames(e, .9, 8)
         self.assertTrue(e.can_interrupt(1))
         self.assertFalse(e.can_reply(1))
 
@@ -56,7 +56,7 @@ class SpeechEvidenceTests(unittest.TestCase):
         e.observe(.01)
         self.assertTrue(e.reply_overdue(0))
         self.assertFalse(e.reply_overdue(1))
-        self.frames(e, .9, 3)
+        self.frames(e, .9, 8)
         self.assertFalse(e.reply_overdue(0))
 
 

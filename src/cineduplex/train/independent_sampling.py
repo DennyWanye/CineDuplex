@@ -51,6 +51,7 @@ def install(model):
             logits = processors(ids, logits)
         if not do_sample or temperature == 0:
             return logits.argmax(-1, keepdim=True)
+        # Preserve the native speech parameters; text/control remain greedy.
         logits = logits.float() / temperature
         if top_k is not None and top_k > 0:
             pivot = logits.topk(min(top_k, logits.shape[-1]))[0][:, -1:]
@@ -79,4 +80,5 @@ def install(model):
     if first!=second:raise ValueError('model sampling depends on global codec RNG')
     return bound, {'seed': seed, 'scope': 'per-call-model-only',
         'processor_contract': 'passed', 'rng_isolation_sequence': first,
-        'codec_rng_can_advance_without_changing_model_sampling': True}
+        'codec_rng_can_advance_without_changing_model_sampling': True,
+        'speech_parameters': 'native-call-arguments'}

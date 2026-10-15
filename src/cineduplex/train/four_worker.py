@@ -129,14 +129,18 @@ def run(config):
         store.json(prefix+'/'+config['phase']+f'/rank{rank}.json',receipt)
         print(json.dumps(receipt),flush=True);dist.barrier();dist.destroy_process_group();return
     control_group=dist.new_group(backend='gloo',timeout=datetime.timedelta(seconds=3600))
+    # Reject incompatible frozen features before reading/loading model shards.
+    if config.get('sharded'):
+        from cineduplex.train.native_audio_contract import require_native_audio_contract
+        payload=json.loads(store.get(config['batch_prefix']+'/batches-index.json',config['batches_sha256']))
+        published=json.loads(store.get('raw/lychee-full-duplex/config.json',config['model']['config_sha256']))
+        require_native_audio_contract(payload,published)
+    else:
+        payload=torch.load(io.BytesIO(store.get(config['batch_prefix']+'/batches.pt',config['batches_sha256'])),map_location='cpu',weights_only=True)
     model=load_model(store,config['model'],control_group);selected=attach(model)
     model.only_training_stoken_and_control=True
     trainable=[p for p in model.parameters() if p.requires_grad]
     optim=torch.optim.AdamW(trainable,lr=config['learning_rate'],weight_decay=0.)
-    if config.get('sharded'):
-        payload=json.loads(store.get(config['batch_prefix']+'/batches-index.json',config['batches_sha256']))
-    else:
-        payload=torch.load(io.BytesIO(store.get(config['batch_prefix']+'/batches.pt',config['batches_sha256'])),map_location='cpu',weights_only=True)
     rows=payload['rows']
     if (len(rows)!=config.get('expected_rows',14)
         or {x['scene_id'] for x in rows}!=set(config.get('expected_scenes',[f'S{i:02}' for i in range(1,11)]))

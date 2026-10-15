@@ -5,7 +5,11 @@ import resource
 import torch
 
 class StageMeter:
-    """Record every stage CPU wall time; Main/control GPU events cover every window; other branches one in 25."""
+    """Record CPU wall time every window; sample all GPU branches one in 25.
+
+    Avoid injecting four CUDA events per native token into the realtime path.
+    Unsampled windows explicitly contain zero completed GPU measurements.
+    """
     def __init__(self,model):
         self.handles=[];self.gc_start=None;self.gc_ms=0.;self.reset()
         def gc_event(phase,info):
@@ -18,7 +22,7 @@ class StageMeter:
             if module is None:continue
             def before(m,args,key=name):
                 begin=None
-                if self.enabled or key in ("model","control_model"):
+                if self.enabled:
                     begin=torch.cuda.Event(enable_timing=True);begin.record()
                 self.active[key]=(time.perf_counter(),begin)
             def after(m,args,output,key=name):

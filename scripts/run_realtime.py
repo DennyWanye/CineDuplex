@@ -16,14 +16,21 @@ from cineduplex.train.nas_mount import DirectMount
 from cineduplex.train.nas_transport import NAS
 
 TUNNEL=r'''
-import json,subprocess,sys,time
+import json,subprocess,sys,time,threading
 args=json.loads(sys.stdin.readline())
 child=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
 try:
  time.sleep(1)
  if child.poll() is not None:raise RuntimeError(child.stderr.read().decode()[-300:])
  print('TUNNEL_READY',flush=True)
- sys.stdin.read()
+ disconnected=threading.Event()
+ def watch_owner():
+  try:sys.stdin.read()
+  finally:disconnected.set()
+ threading.Thread(target=watch_owner,daemon=True).start()
+ while not disconnected.wait(.5):
+  if child.poll() is not None:
+   raise RuntimeError('SSH tunnel exited: '+child.stderr.read().decode()[-300:])
 finally:
  if child.poll() is None:child.terminate()
  child.wait(timeout=15)

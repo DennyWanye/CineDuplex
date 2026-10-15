@@ -71,7 +71,7 @@ def serve(root,cert,key,host,port,plain_port,upstream):
                 'echo_cancellation','noise_suppression','auto_gain_control','context_sample_rate','input_sample_rate',
                 'precision','runtime_sha256','tensor_parallel_size','voice','language','reason','message','jitter','jitter_buffer_delay',
                 'packets_lost','concealed_samples','total_samples_received','reference_connected','count','played_packets',
-                'received_packets','sent_packets','muted','browser','lead_seconds','producer_ratio'}
+                'received_packets','sent_packets','muted','browser','output_device','lead_seconds','producer_ratio'}
             # Validate the whole batch before appending anything. Retries and
             # web service restarts must not duplicate diagnostic sequence IDs.
             for entry in entries:
@@ -155,6 +155,11 @@ def serve(root,cert,key,host,port,plain_port,upstream):
             if not self.allowed():return self.send(403,{'error':'仅限局域网'})
             path=urlparse(self.path).path
             assets={'/':('realtime.html','text/html; charset=utf-8'),
+                    '/lab/':('realtime-lab.html','text/html; charset=utf-8'),
+                    '/voice.css':('voice.css','text/css; charset=utf-8'),
+                    '/messages.css':('messages.css','text/css; charset=utf-8'),
+                    '/messages.js':('messages.js','text/javascript; charset=utf-8'),
+                    '/xiaocheng.png':('xiaocheng.png','image/png'),
                     '/realtime.js':('realtime.js','text/javascript; charset=utf-8'),
                     '/capture.worklet.js':('capture.worklet.js','text/javascript; charset=utf-8')}
             if path in assets:

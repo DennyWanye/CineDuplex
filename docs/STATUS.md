@@ -1,5 +1,9 @@
 # Capability and verification status
 
+## 2026-10-15 原生语音排查暂停，质量未通过
+
+用户要求停止继续处理，仅整理和推送代码与既有检查结果。本次不运行测试或部署。声音生成异常的具体原因仍未锁定，事实错误、音质和持续实时速度尚未验收；安全通过与服务恢复不能替代质量通过。详见[检查结果与暂停交接](NATIVE_VOICE_INVESTIGATION_20261015.zh-CN.md)及[公开证据索引](NATIVE_VOICE_EVIDENCE_20261015.json)。下文均为带日期的历史记录。
+
 ## 2026-10-11 input semantics and whole-audio review
 
 Input audio now runs Aliyun standard audio moderation and then AI Guardrails

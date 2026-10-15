@@ -71,6 +71,58 @@ def answer(gate, text='春天天气温暖。', event_id='evt-1'):
 
 
 class ClientTests(unittest.TestCase):
+    def test_tls_connection_reuse_and_redirect_failure_without_retry(self):
+        class Response:
+            status=200;will_close=False
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self,limit):return b'{}'
+        class Connection:
+            def __init__(self,*a,**k):self.sock=None;self.response=Response();self.requests=0;self.closed=False
+            def request(self,*a,**k):self.requests+=1
+            def getresponse(self):return self.response
+            def close(self):self.closed=True
+        client=AliyunGuardrail(Config(enabled=True,access_key_id='id',access_key_secret='key'))
+        request=__import__('urllib.request',fromlist=['Request']).Request('https://green-cip.cn-shanghai.aliyuncs.com/',data=b'x')
+        with patch('cineduplex.guardrail.aliyun_guardrail.http.client.HTTPSConnection',side_effect=Connection) as factory:
+            client._https(request,1);client._https(request,1)
+            self.assertEqual(factory.call_count,1)
+            conn=client.connections.pool['green-cip.cn-shanghai.aliyuncs.com'][0]
+            conn.response.status=302
+            with self.assertRaisesRegex(GuardrailError,'unexpected_redirect'):client._https(request,1)
+            self.assertEqual(conn.requests,3);self.assertTrue(conn.closed)
+            self.assertFalse(client.connections.pool)
+            bad=__import__('urllib.request',fromlist=['Request']).Request('https://example.com/',data=b'x')
+            with self.assertRaisesRegex(GuardrailError,'cloud_endpoint_invalid'):client._https(bad,1)
+            self.assertEqual(factory.call_count,1)
+
+    def test_retry_only_readonly_existing_result_once(self):
+        errors=[GuardrailError('cloud_transport_failed'),b'{"Code":280}']
+        transport=lambda *a: (_ for _ in ()).throw(errors.pop(0)) if isinstance(errors[0],Exception) else errors.pop(0)
+        client=AliyunGuardrail(Config(enabled=True,access_key_id='id',access_key_secret='key'),transport)
+        self.assertEqual(client.rpc('VoiceModerationResult',parameters={'taskId':'original'})['Code'],280)
+        for action in ('VoiceModeration','MultiModalGuard'):
+            requests=[]
+            def fail(*a):requests.append(a);raise GuardrailError('cloud_transport_failed')
+            client.transport=fail
+            with self.assertRaises(GuardrailError):client.rpc(action)
+            self.assertEqual(len(requests),1)
+
+    def test_upload_retry_keeps_exact_object_and_bytes_with_deadline(self):
+        requests=[]
+        def transport(request,timeout):
+            requests.append((request.full_url,request.data,timeout))
+            if len(requests)==1:raise GuardrailError('cloud_transport_failed')
+            return b''
+        client=AliyunGuardrail(Config(enabled=True,access_key_id='id',access_key_secret='key'),transport)
+        client.upload_token={'Expiration':time.time()+3600,'OssInternetEndPoint':'oss-cn-shanghai.aliyuncs.com',
+            'BucketName':'safe-test-bucket','FileNamePrefix':'test/','SecurityToken':'test',
+            'AccessKeySecret':'test','AccessKeyId':'test'}
+        client._upload_wav(b'\x01\x00'*16000,16000,time.monotonic()+30)
+        self.assertEqual(len(requests),2)
+        self.assertEqual(requests[0][:2],requests[1][:2])
+        self.assertTrue(all(0 < r[2] <= 15 for r in requests))
+
     def test_audio_pending_code_only_allowed_for_result_query(self):
         client = AliyunGuardrail(Config(enabled=True, access_key_id='id', access_key_secret='key'),
                                 lambda *args: b'{"Code":280,"Data":{"RiskLevel":"none"}}')
@@ -234,6 +286,29 @@ class GateTests(unittest.TestCase):
         gate.input_audio(1, b'\x01\x00' * 16000)
         wait_for(lambda: gate.input_reviewed == 1)
         self.assertEqual(len(self.client.audio_requests), 1)
+
+    def test_busy_input_review_batches_quiet_tails_without_losing_barrier_bytes(self):
+        client = FakeClient(Config(enabled=True, input_audio=True, input_window_seconds=10))
+        client.audio_release.clear()
+        gate = self.make_gate(client)
+        pcm = b'\xe8\x03' * 3200 + b'\x00\x00' * 6400
+        gate.input_audio(0, pcm)
+        wait_for(client.audio_entered.is_set)
+        gate.input_audio(1, pcm)
+        for seq in range(2, 12):
+            gate.input_audio(seq, pcm)
+        self.assertEqual(gate.input_submitted, 2)
+        self.assertEqual(gate.input_queue.qsize(), 1)
+        self.assertEqual(bytes(gate.input_buffer), pcm * 10)
+        self.assertFalse(self.call.closed.is_set())
+        with gate.lock:
+            barrier = gate._queue_input()
+        self.assertEqual(barrier, 3)
+        client.audio_release.set()
+        wait_for(lambda: gate.input_reviewed == barrier)
+        self.assertEqual([item[0] for item in client.audio_requests],
+                         [pcm, pcm[-32000:] + pcm, pcm[-32000:] + pcm * 10])
+        self.assertFalse(self.call.closed.is_set())
 
     def test_untranscribable_output_is_never_released(self):
         cfg = Config(enabled=True, output_audio=True, timeout=.1, audio_deadline=1)
@@ -428,6 +503,193 @@ class GateTests(unittest.TestCase):
         ns['emit'](self.call, {'type': 'text_delta', 'event_id': 'evt-2', 'snapshot': 'disabled'})
         self.assertEqual(self.content()[0]['snapshot'], 'disabled')
 
+
+
+class PrefixTests(unittest.TestCase):
+    def gate(self, client=None, **flags):
+        config = Config(enabled=True, output_audio=True, output_mode='reviewed-prefix',
+                        timeout=.1, audio_deadline=1, **flags)
+        client = client or FakeClient(config)
+        client.config = config
+        call = FakeCall(); gate = CallGuardrail(call, client)
+        self.addCleanup(gate.close)
+        return call, gate, client
+
+    def send(self, gate, pcm, text='春天天气温暖。', end=False):
+        gate.intercept({'type':'text_delta','event_id':'p','epoch':0,'snapshot':text})
+        gate.intercept({'type':'audio','event_id':'p','epoch':0,'sample_rate':24000,
+                        'pcm':base64.b64encode(pcm).decode()})
+        if end:
+            gate.intercept({'type':'event_end','event_id':'p','epoch':0,'text':text})
+            gate.intercept({'type':'audio_end','event_id':'p','epoch':0})
+
+    def test_native_text_and_audio_overlap_but_both_must_pass(self):
+        call, gate, client = self.gate()
+        native_release=threading.Event(); native_entered=threading.Event()
+        original=client.check_text
+        def check(text, **kwargs):
+            if '-prefix-' in kwargs['chat_id']:
+                native_entered.set(); native_release.wait(1)
+            return original(text, **kwargs)
+        client.check_text=check
+        self.send(gate,b'\x01\x00'*28800)
+        self.assertTrue(native_entered.wait(1))
+        self.assertTrue(client.audio_entered.wait(1))
+        wait_for(lambda:any(e.get('direction')=='output_audio_semantic' for e in call.events))
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+        native_release.set()
+        wait_for(lambda:any(e['type']=='audio' for e in call.events))
+
+    def test_native_text_risk_cancels_pending_audio_without_release(self):
+        call, gate, client = self.gate()
+        client.audio_release.clear(); client.text_allowed=False
+        self.send(gate,b'\x01\x00'*28800)
+        wait_for(call.closed.is_set)
+        client.audio_release.set()
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+        self.assertEqual(call.reason,'guardrail_blocked')
+
+    def test_cancelled_parallel_text_error_cannot_stop_new_epoch(self):
+        call, gate, client = self.gate()
+        release=threading.Event(); entered=threading.Event()
+        original=client.check_text
+        def check(text, **kwargs):
+            if kwargs['chat_id']=='p-prefix-1':
+                entered.set(); release.wait(1); raise GuardrailError('late_text_error')
+            return original(text, **kwargs)
+        client.check_text=check
+        self.send(gate,b'\x01\x00'*28800)
+        self.assertTrue(entered.wait(1))
+        with gate.lock:
+            gate._cancel('p');call.epoch+=1
+        release.set()
+        time.sleep(.05)
+        self.assertFalse(call.closed.is_set())
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+
+    def test_release_before_end_exact_bytes_with_receipts_and_final_tail(self):
+        call, gate, client = self.gate()
+        first=b'\x01\x00'*28800; tail=b'\x02\x00'*100
+        self.send(gate, first)
+        wait_for(lambda:any(e['type']=='audio' for e in call.events))
+        self.assertFalse(any(e['type']=='audio_end' for e in call.events))
+        self.assertTrue(any(e['direction']=='output_audio_semantic' for e in call.events if e['type']=='guardrail_result'))
+        self.send(gate, tail, end=True)
+        wait_for(lambda:any(e['type']=='audio_end' for e in call.events))
+        audio=[e for e in call.events if e['type']=='audio']
+        self.assertEqual(b''.join(base64.b64decode(e['pcm']) for e in audio),first+tail)
+        self.assertEqual([e['sample_offset'] for e in audio],[0,len(first)//2])
+        self.assertEqual(client.audio_requests[-1][0],first+tail)
+        self.assertTrue(audio[-1]['final_chunk'])
+
+    def test_out_of_order_cloud_results_cannot_release_out_of_order(self):
+        call, gate, client = self.gate()
+        original=client.check_audio; first_entered=threading.Event(); release=threading.Event()
+        def check(pcm,**kwargs):
+            if len(pcm)==57600:
+                first_entered.set();release.wait(1)
+            return original(pcm,**kwargs)
+        client.check_audio=check
+        self.send(gate,b'\x01\x00'*28800);self.assertTrue(first_entered.wait(1))
+        self.send(gate,b'\x02\x00'*28800)
+        wait_for(lambda:len(client.audio_requests)>=1)
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+        release.set();wait_for(lambda:len([e for e in call.events if e['type']=='audio'])==2)
+        self.assertEqual([e['sample_offset'] for e in call.events if e['type']=='audio'],[0,28800])
+
+    def test_early_runway_then_coalesce_without_discarding_audio(self):
+        call,gate,client=self.gate()
+        self.send(gate,b'\x01\x00'*28800)
+        wait_for(lambda:len(client.audio_requests)==1)
+        self.send(gate,b'\x02\x00'*28800)
+        wait_for(lambda:len(client.audio_requests)==2)
+        self.send(gate,b'\x03\x00'*28800)
+        self.assertEqual(gate.responses['p'].prefix_index,2)
+        self.send(gate,b'\x04\x00'*28800,end=True)
+        wait_for(lambda:any(e['type']=='audio_end' for e in call.events))
+        self.assertEqual(client.audio_requests[-1][0],
+            b'\x01\x00'*28800+b'\x02\x00'*28800+b'\x03\x00'*28800+b'\x04\x00'*28800)
+
+    def test_final_marker_does_not_duplicate_inflight_audio_upload(self):
+        call,gate,client=self.gate();client.audio_release.clear()
+        self.send(gate,b'\x01\x00'*28800)
+        self.assertTrue(client.audio_entered.wait(1))
+        gate.intercept({'type':'event_end','event_id':'p','epoch':0,'text':'春天天气温暖。'})
+        gate.intercept({'type':'audio_end','event_id':'p','epoch':0})
+        client.audio_release.set();wait_for(lambda:any(e['type']=='audio_end' for e in call.events))
+        self.assertEqual(len(client.audio_requests),1)
+        self.assertTrue(next(e for e in call.events if e['type']=='audio')['final_chunk'])
+
+    def test_partial_unrecognized_is_held_and_final_unrecognized_fails_closed(self):
+        call, gate, client=self.gate()
+        client.check_audio=lambda *a,**k:Decision(True,'pass',transcript='')
+        self.send(gate,b'\x01\x00'*28800)
+        wait_for(lambda:any(e.get('phase')=='coalescing' for e in call.events))
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+        self.send(gate,b'\x02\x00'*20,end=True)
+        wait_for(call.closed.is_set)
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+
+    def test_later_risk_stops_without_releasing_bad_pcm(self):
+        call, gate, client=self.gate()
+        self.send(gate,b'\x01\x00'*28800)
+        wait_for(lambda:any(e['type']=='audio' for e in call.events))
+        client.audio_allowed=False
+        self.send(gate,b'\x02\x00'*28800)
+        wait_for(call.closed.is_set)
+        self.assertEqual(len([e for e in call.events if e['type']=='audio']),1)
+        self.assertTrue(any(e['type']=='stop_audio' for e in call.events))
+
+    def test_sealed_input_boundary_does_not_chase_future_samples_and_later_risk_still_stops(self):
+        call, gate, client = self.gate(input_audio=True)
+        first = threading.Event(); later = threading.Event()
+        self.addCleanup(first.set); self.addCleanup(later.set)
+        original = client.check_audio
+        def review(pcm, **kwargs):
+            if kwargs['sample_rate'] == 16000:
+                client.audio_requests.append((pcm, kwargs))
+                if kwargs['data_id'].endswith('-in-1'):
+                    first.wait(1)
+                    return Decision(True, 'pass', 'first-input')
+                later.wait(1)
+                return Decision(False, 'block', 'later-input-risk')
+            return original(pcm, **kwargs)
+        client.check_audio = review
+        prior_pcm = b'\x01\x00' * 3200
+        gate.input_audio(0, prior_pcm)
+        self.send(gate, b'\x02\x00' * 28800)
+        wait_for(lambda:any(e.get('phase') == 'input_review' for e in call.events))
+        boundary = next(e for e in call.events if e.get('phase') == 'input_review')
+        self.assertEqual(boundary['input_barrier'], 1)
+        self.assertEqual(boundary['input_seq_through'], 0)
+        self.assertFalse(any(e['type'] == 'audio' for e in call.events))
+        future_pcm = b'\x03\x00' * 3200
+        gate.input_audio(1, future_pcm)
+        with gate.lock:
+            gate._queue_input()
+        first.set()
+        wait_for(lambda:any(e['type'] == 'audio' for e in call.events))
+        receipt = next(e for e in call.events if e['type'] == 'guardrail_pass')
+        self.assertEqual(receipt['input_barrier'], 1)
+        self.assertEqual(receipt['input_seq_through'], 0)
+        self.assertGreaterEqual(receipt['input_reviewed'], 1)
+        requests = [p for p, k in client.audio_requests if k['sample_rate'] == 16000]
+        wait_for(lambda:len([p for p,k in client.audio_requests if k['sample_rate']==16000])==2)
+        self.assertEqual([p for p,k in client.audio_requests if k['sample_rate']==16000],
+                         [prior_pcm, prior_pcm + future_pcm])
+        later.set(); wait_for(call.closed.is_set)
+        self.assertEqual(len([e for e in call.events if e['type']=='audio']), 1)
+        self.assertTrue(any(e['type']=='stop_audio' for e in call.events))
+
+    def test_input_barrier_and_cancelled_epoch_keep_pcm_private(self):
+        call, gate, client=self.gate(input_audio=True)
+        gate.input_submitted=1;gate.input_reviewed=0
+        self.send(gate,b'\x01\x00'*28800)
+        wait_for(lambda:any(e.get('direction')=='output_audio_semantic' for e in call.events))
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
+        call.epoch=1;gate.intercept({'type':'stop_audio','epoch':1})
+        with gate.condition:gate.input_reviewed=1;gate.condition.notify_all()
+        self.assertFalse(any(e['type']=='audio' for e in call.events))
 
 if __name__ == '__main__':
     unittest.main()

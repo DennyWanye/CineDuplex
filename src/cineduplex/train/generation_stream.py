@@ -13,6 +13,30 @@ def validated_triplet(text,speech,control):
     return values
 
 
+def merge_conditioning(model, ids, next_text, start, length):
+    """Keep actual merge inputs, including discarded listening predictions.
+
+    Visible listening history contains PAD. That is different from the sampled
+    text which the native model already used in its merge KV. A cache rebuild
+    must replay that conditioning rather than invent a PAD-conditioned past.
+    Negative entries represent only a replaced system prefix.
+    """
+    tokens = next_text if length == 1 else torch.cat((ids[:, start+1:start+length], next_text), 1)
+    history = getattr(model, '_cineduplex_merge_conditioning', None)
+    if history is not None:
+        overlap = min(length, max(0, history.shape[1]-start))
+        if overlap:
+            previous = history[:, start:start+overlap]
+            tokens = torch.cat((torch.where(previous >= 0, previous, tokens[:, :overlap]), tokens[:, overlap:]), 1)
+        before = history[:, :start]
+        if before.shape[1] < start:
+            before = torch.cat((before, ids.new_full((1, start-before.shape[1]), -1)), 1)
+    else:
+        before = ids.new_full((1, start), -1)
+    model._cineduplex_merge_conditioning = torch.cat((before, tokens), 1)
+    return tokens
+
+
 def stream(self, **kw):
     from transformers.cache_utils import DynamicCache
     limit = int(kw.pop('max_new_tokens', 1))
@@ -53,7 +77,7 @@ def stream(self, **kw):
                 kw.get('logits_processor'),temperature,top_k,top_p,False)
             if self.merge_model is not None:
                 hidden=output.stoken_hidden_states;length=hidden.shape[1]
-                next_text_ids=next_text if length==1 else torch.cat((ids[:,start+1:start+length],next_text),1)
+                next_text_ids=merge_conditioning(self, ids, next_text, start, length)
                 merge=self.merge_model(inputs_embeds=hidden+self.get_input_embeddings()(next_text_ids),
                     attention_mask=None,position_ids=None,use_cache=True,
                     past_key_values=caches['merge_past_key_values'],cache_position=pos)
